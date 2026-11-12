@@ -25,3 +25,7 @@ Curated, persistent. Caveman.
 - **Sub-pixel splats:** star kernel must be well sampled: tent at 1 px half-width = exact constant energy; Gaussian exp(-4r²) needs ≥1.5 px half-width. Undersampled -> 0..5× flashes.
 - **NaN -> flash:** GPU min(NaN, cap) returns cap -> a NaN pixel becomes the brightest value, bloom spreads it. Clamp asin/acos inputs of rotated/normalized vectors (poles, zenith round past ±1). Find one-frame spots: isolated-bright-pixel detector vs neighbor frames, then toggle bloom / objects.
 - **RGB lighting:** saturated Preetham sky x orange albedo -> olive shade; temper sky light chroma (keep luminance) for lighting only.
+
+## Capture
+- console capture() -> src/Capture.ts. read pipeline.output.color (linear, effects, no overlays), not canvas. EXRExporter flips rows (WebGL convention) -> sample y-flipped. EXR encode ~3 s/frame 4096 -> workers (CaptureWorker.ts), dir handle via postMessage. Promise from async fn flattens -> wrap {written}.
+- fixed res = DrawnViewport.resolution (pixelRatio 1, CSS fits canvas). showDirectoryPicker needs gesture: call before any await.

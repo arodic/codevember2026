@@ -24,6 +24,7 @@ import { TimelineFade } from './fold/TimelineFade.js'
 import { CanyonPath } from './fold/CanyonPath.js'
 import { FoldTerrain, TERRAIN_SIZE, createGeologyUniforms } from './fold/FoldTerrain.js'
 import type { PlaybackListener } from '../IoCodevember.js'
+import type { CaptureListener, CaptureStage } from '../Capture.js'
 
 /** The soundtrack, which plays with the timeline. */
 const SOUNDTRACK = new URL('./fold/CanyonHum.mp3', import.meta.url).href
@@ -147,7 +148,7 @@ interface RendererState {
  * `randomizePalette` make another belt. Plays when opened.
  */
 @Register
-export class Fold extends Document implements PlaybackListener {
+export class Fold extends Document implements PlaybackListener, CaptureListener {
 
   @Property({type: String, value: 'Canyon'})
   declare cameraMode: FoldCamera
@@ -348,6 +349,12 @@ export class Fold extends Document implements PlaybackListener {
   /** The soundtrack; whether the editor plays the document; whether the browser holds its sound until a gesture. */
   private soundtrack: HTMLAudioElement = Object.assign(new Audio(SOUNDTRACK), {preload: 'auto', loop: false})
   private playing = false
+  /**
+   * What a frame capture does (`CaptureListener`): while it captures the landscape is computed in full at once (no
+   * drafts, every frame is a still); through a frame's subframes the global illumination goes on refining (its
+   * running average is not shortened by the light and land moving the fraction of a frame between them).
+   */
+  private captureStage: CaptureStage = 'off'
   private soundtrackHeld = false
   /** Counts `onAnimate` calls. */
   private animationTick = 0
@@ -452,6 +459,11 @@ export class Fold extends Document implements PlaybackListener {
     this.advanceClouds(time)
     this.applyWeather()
     this.updateCamera()
+  }
+
+  /** A frame capture started, stopped or moved through a frame (`CaptureListener`). */
+  captureChanged(stage: CaptureStage) {
+    this.captureStage = stage
   }
 
   /** The editor started or stopped playing the document (`PlaybackListener`): the soundtrack plays along. */
@@ -646,7 +658,7 @@ export class Fold extends Document implements PlaybackListener {
     canyon.floor = -(6 + 16 * this.canyonDepth) * incision
     canyon.sync()
 
-    this.terrainDraft = this.animating
+    this.terrainDraft = this.animating && this.captureStage === 'off'
     this.terrainVersion++
     this.lightingTick++
     this.updateCamera()
@@ -800,17 +812,18 @@ export class Fold extends Document implements PlaybackListener {
    * the light). The average spans the last `LIGHTING_HISTORY` updates while the light changes, so the light follows
    * the sun within a second, and fewer while the level of the light drifts fast (`LIGHTING_DRIFT`); once nothing
    * changes it keeps growing, refining the light (when paused, every draw) until it spans `LIGHTING_STILL_HISTORY`
-   * and has converged.
+   * and has converged. Through a capture's subframes it keeps growing whatever changes (the fraction of a frame).
    */
   private updateLighting(renderer: WebGPURenderer, state: RendererState, playing: boolean) {
-    const changing = playing || state.lightingTick !== this.lightingTick
+    const held = this.captureStage === 'subframes'
+    const changing = !held && (playing || state.lightingTick !== this.lightingTick)
     state.lightingTick = this.lightingTick
     if (changing) state.lightingHistory = Math.min(state.lightingHistory, LIGHTING_HISTORY)
-    else if (state.lightingHistory >= LIGHTING_STILL_HISTORY) return
-    if (playing && state.draw % LIGHTING_INTERVAL !== 0) return
+    else if (state.lightingHistory >= LIGHTING_STILL_HISTORY && !held) return
+    if (playing && !held && state.draw % LIGHTING_INTERVAL !== 0) return
     const level = this.lightLevel.value
     const drift = Math.abs(Math.log(level / state.lightingLevel))
-    if (drift > 0) state.lightingHistory = Math.min(state.lightingHistory, Math.floor(LIGHTING_DRIFT / drift))
+    if (drift > 0 && !held) state.lightingHistory = Math.min(state.lightingHistory, Math.floor(LIGHTING_DRIFT / drift))
     state.lightingHistory++
     state.lightingLevel = level
     this.terrain.updateLighting(renderer, 1 / state.lightingHistory, state.draw)
@@ -846,12 +859,12 @@ export class Fold extends Document implements PlaybackListener {
       state.terrainVersion = this.terrainVersion
       state.terrainDraft = this.terrainDraft
       state.terrainDraw = state.draw
-      state.lightingHistory = Math.min(state.lightingHistory, LIGHTING_RESHAPED_HISTORY)
+      if (this.captureStage !== 'subframes') state.lightingHistory = Math.min(state.lightingHistory, LIGHTING_RESHAPED_HISTORY)
     } else if (state.terrainVersion === this.terrainVersion && state.terrainDraft && sinceTerrain >= DRAFT_SETTLE) {
       this.terrain.update(renderer, false)
       state.terrainDraft = false
       state.terrainDraw = state.draw
-      state.lightingHistory = Math.min(state.lightingHistory, LIGHTING_RESHAPED_HISTORY)
+      if (this.captureStage !== 'subframes') state.lightingHistory = Math.min(state.lightingHistory, LIGHTING_RESHAPED_HISTORY)
     }
     if (state.terrainVersion !== this.terrainVersion || state.terrainDraft) this.notify({kind: 'other'})
 
@@ -966,7 +979,7 @@ registerEditor(Fold, {
       'celestialFrame', 'sunDirection', 'moonDirection', 'cameraTarget', 'flightAngle', 'indirectLevel', 'lightingTick',
       'terrainVersion', 'animating', 'animationTick', 'terrainDraft', 'environmentVersion',
       'lightingVersion', 'litDirection', 'litPreExposure', 'renderers', 'cloudsAt', 'animatedAt', 'soundtrack', 'playing',
-      'soundtrackHeld',
+      'soundtrackHeld', 'captureStage',
     ],
   },
 })

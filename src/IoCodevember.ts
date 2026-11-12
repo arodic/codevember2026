@@ -7,7 +7,8 @@ import { SelectionModel, Document, Editor, View, ViewOverlays, ThreeViewport, th
 import { ioLayout, IoTab, Layout } from '@io-gui/layout'
 import { threeEditorStatus } from './ThreeEditorStatus.js'
 import { documentHeader } from './DocumentHeader.js'
-import { drawnViewport, DocumentDrawn } from './DrawnViewport.js'
+import { drawnViewport, DocumentDrawn, DrawnViewport } from './DrawnViewport.js'
+import { CaptureOptions, CaptureResult, FrameCapture, pickCaptureDirectory } from './Capture.js'
 
 const editorLayout = new Layout({
   child: {
@@ -277,6 +278,16 @@ export class IoCodevember extends ReactiveElement {
         pointer-events: auto;
         transition: none;
       }
+      /* A capture shows the frames alone; its canvas keeps the capture's pixels and is fitted to the frame. */
+      :host[capturing] > three-timeline,
+      :host[capturing] > .fullscreen > document-header {
+        display: none;
+      }
+      :host[capturing] > .fullscreen > drawn-viewport > canvas {
+        width: 100% !important;
+        height: 100% !important;
+        object-fit: contain;
+      }
     `
   }
 
@@ -323,6 +334,10 @@ export class IoCodevember extends ReactiveElement {
   @Property({type: Boolean, value: true, reflect: true})
   declare loading: boolean
 
+  /** Whether frames are being captured (`capture`). */
+  @Property({type: Boolean, value: false, reflect: true})
+  declare capturing: boolean
+
   /** Documents a viewport has drawn: switching back to one shows it at once. */
   @Field(WeakSet)
   declare private _drawnDocuments: WeakSet<Document>
@@ -333,6 +348,9 @@ export class IoCodevember extends ReactiveElement {
   /** Loaded documents by name. A Field: `ready()` runs inside the base constructor. */
   @Field(Map)
   declare private _documents: Map<string, Promise<Document>>
+
+  /** The capture under way. */
+  private _capture: FrameCapture | null = null
 
   /** The document time the inspector tabs last showed. */
   private _shownTime = NaN
@@ -402,6 +420,10 @@ export class IoCodevember extends ReactiveElement {
    */
   onKeyDown(event: KeyboardEvent) {
     if (event.defaultPrevented || this.loading) return
+    if (this.capturing) {
+      if (event.key === 'Escape') this.stopCapture()
+      return
+    }
     if (event.key === 'Escape' && this.fullscreen) {
       this.fullscreen = false
     } else if (event.code === 'Space' && !event.repeat && !handlesSpace(event)) {
@@ -412,6 +434,42 @@ export class IoCodevember extends ReactiveElement {
 
   goFullscreen() {
     this.fullscreen = true
+  }
+
+  /**
+   * Captures the editor's document frame by frame to a folder (`FrameCapture`; from the console, `capture(options)`):
+   * fullscreen, at the capture's resolution, paused, without the timeline. Afterwards the time, playback and
+   * fullscreen are as they were. Escape or `stopCapture()` stops it.
+   */
+  async capture(options: CaptureOptions = {}): Promise<CaptureResult> {
+    if (this._capture) throw new Error('capture: already capturing (stopCapture() stops it)')
+    if (this.loading) throw new Error('capture: the document is still loading')
+    // the picker first, while the gesture that asked for the capture counts
+    const directory = await (options.directory ?? pickCaptureDirectory())
+    const document = this.editor.document
+    const viewport = this.querySelector('#Fullscreen') as DrawnViewport
+    const capture = new FrameCapture(viewport, document, directory, {...options, name: options.name ?? this.documentName.toLowerCase()})
+    const was = {fullscreen: this.fullscreen, playing: this.editor.isPlaying, time: document.timeline.currentTime}
+    this._capture = capture
+    this.editor.isPlaying = false
+    this.fullscreen = true
+    this.capturing = true
+    viewport.resolution = {width: capture.width, height: capture.height}
+    try {
+      return await capture.run()
+    } finally {
+      this._capture = null
+      viewport.resolution = null
+      this.capturing = false
+      this.fullscreen = was.fullscreen
+      document.timeline.currentTime = was.time
+      this.editor.isPlaying = was.playing
+    }
+  }
+
+  /** Stops the capture under way after the frame in hand. */
+  stopCapture() {
+    this._capture?.stop()
   }
 
   /** A viewport drew a document for the first time: once that is the document asked for, lift the loading cover. */
