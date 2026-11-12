@@ -1,0 +1,43 @@
+{
+  "name": "codevember",
+  "version": "1.0.0",
+  "description": "Codevember 2026: procedural WebGPU sketches built with Io-Gui and three.js",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.5.0",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc",
+    "lint": "eslint . --fix",
+    "lint:check": "eslint .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@io-gui/colors": "link:../Projects/io/packages/colors",
+    "@io-gui/core": "link:../Projects/io/packages/core",
+    "@io-gui/editors": "link:../Projects/io/packages/editors",
+    "@io-gui/icons": "link:../Projects/io/packages/icons",
+    "@io-gui/inputs": "link:../Projects/io/packages/inputs",
+    "@io-gui/layout": "link:../Projects/io/packages/layout",
+    "@io-gui/menus": "link:../Projects/io/packages/menus",
+    "@io-gui/navigation": "link:../Projects/io/packages/navigation",
+    "@io-gui/sliders": "link:../Projects/io/packages/sliders",
+    "@io-gui/three": "link:../Projects/io/packages/three",
+    "three": "^0.187.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@stylistic/eslint-plugin": "^5.10.0",
+    "@types/three": "^0.187.0",
+    "@vitest/browser-playwright": "5.0.3",
+    "eslint": "^10.12.0",
+    "playwright": "1.64.0",
+    "terser": "^5.51.2",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.71.1",
+    "vite": "^8.3.4",
+    "vitest": "5.0.3"
+  }
+}

@@ -1,0 +1,111 @@
+---
+alwaysApply: true
+metadata:
+  internal: "true"
+---
+
+# Memory Management
+
+## Three-Tier Architecture
+
+| File                 | Purpose                     | Pruning              |
+| -------------------- | --------------------------- | -------------------- |
+| `.memory/now.md`     | Hot context - current focus | Extremely aggressive |
+| `.memory/working.md` | Persistent curated memory   | Based on judgment    |
+| `.memory/archive.md` | Complete memory dump        | When instructed      |
+
+### now.md - Current Focus
+
+Read and update constantly during work sessions.
+
+**Aggressive pruning**: When starting new work, delete anything irrelevant to current context. Only keep:
+
+- Current task description
+- Key context needed right now
+- Active blockers / open questions
+
+Even if information is already in context window, iterating important things here reinforces focus. For anything that needs to persist beyond current task, use working memory.
+
+### working.md - Persistent Memory
+
+Curated knowledge that persists across sessions:
+
+- Architectural decisions and reasoning
+- Code patterns that worked
+- Code patterns that failed
+- Open design questions
+- Package-specific notes
+
+**Pruning strategy**: Information that is proven outdated or irrelevant to any foreseeable future work can be pruned.
+
+**Compression** Use caveman.
+
+### archive.md - Memory dumping ground
+
+**Commit extremely aggressively.** After every response, consider if anything should be archived. No permission needed. Just do it.
+
+Log everything:
+
+- Decisions made
+- Problems solved
+- Patterns discovered
+- Questions asked
+- Errors encountered
+- Approaches tried
+
+**Format**: Entries with category tags for later analysis.
+
+## Memory Hygiene
+
+### Proactive Updates
+
+Don't wait for reminders. Update memory throughout sessions as significant things happen.
+
+### NEVER Ask Permission
+
+Commit to memory on your own. The judgment call is yours.
+
+**Commit frequency by tier:**
+
+- **archive.md**: Extremely aggressive. After every response, consider what to log. Just do it.
+- **now.md**: Aggressive. Update frequently, it gets pruned often anyway.
+- **working.md**: Conservative. Commit what feels important and persistent.
+
+### Memory Without Structure Becomes Noise
+
+- Consolidate similar items
+- Remove redundant entries
+- Keep files lean and scannable
+
+### Write Immediately
+
+Mental notes don't survive. If it matters, write it now.
+
+### Checkpoint Decisions, Not Just State
+
+Reasoning is more valuable than conclusions. Record why, not just what.
+
+## Session Workflow
+
+### Starting Work
+
+1. Read `.memory/now.md` — current focus
+2. Clear irrelevant items from now.md
+3. Read `.memory/working.md` if deeper context needed
+
+### During Work
+
+- Update now.md as focus shifts
+- Commit insights to archive.md
+- Move persistent learnings to working.md
+
+### Ending Work
+
+1. Update now.md with current state
+2. Commit session summary to archive.md
+3. Promote valuable insights to working.md
+4. Prune now.md to minimal state
+
+## Compression
+
+Memory grow big. Use caveman.
