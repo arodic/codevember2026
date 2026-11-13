@@ -3,13 +3,11 @@ import {
   Node, NodeBuilder, RGBAFormat, RepeatWrapping, Texture,
 } from 'three/webgpu'
 import {
-  Fn, abs, attribute, cameraPosition, clamp, color, dot, float, getParallaxCorrectNormal, max, mix, mx_noise_float,
-  normalWorldGeometry, normalize, pmremTexture, positionWorld, pow, reflect, saturate, select, texture, texture3D,
-  transformNormalToView, vec3,
+  abs, attribute, cameraPosition, float, getParallaxCorrectNormal, mix, normalWorldGeometry, normalize,
+  pmremTexture, positionWorld, pow, reflect, saturate, select, texture, transformNormalToView, vec3,
 } from 'three/tsl'
-import { lightProbeGridIrradiance } from 'three/addons/tsl/lighting/LightProbeGridNode.js'
-import { HOLLOW_MIN, HOLLOW_SIZE, HollowField } from './HollowField.js'
-import type { HollowLighting } from './HollowLighting.js'
+import type {HollowField} from './HollowField.js'
+import type {HollowLighting} from './HollowLighting.js'
 
 /**
  * Physical material lit by a TSL irradiance node (`lightMapNode`). three r187 lacks `NodeMaterial.lightMapNode`.
@@ -135,18 +133,15 @@ export interface HollowRockMaterialOptions {
 }
 
 /**
- * Wet limestone: dual LightProbeGrid GI, world-space derivative triplanar, 3D-SDF collar blend / AO, dual-normal clearcoat.
+ * Wet limestone: world-space triplanar + wet clearcoat.
+ * Indirect GI comes from the visible `LightProbeGrid` via three's automatic `LightProbeGridNode`.
+ *
+ * NOTE: 3D-SDF normal/AO sampling is intentionally omitted for now — `texture3D(sdf)` produced NaN normals
+ * that blacked out the cavern even when collar weight was 0 (`mix(geo, NaN, 0)`). Reintroduce once the volume
+ * bind is proven on r187.
  */
 export function createHollowRockMaterial(opts: HollowRockMaterialOptions): HollowLightMappedMaterial {
-  const {field, lighting, rockAtlas, travertineAtlas, styleMode} = opts
-  const sdfTex = field.sdfTexture
-  const bMin = vec3(HOLLOW_MIN.x, HOLLOW_MIN.y, HOLLOW_MIN.z)
-  const bSize = vec3(HOLLOW_SIZE.x, HOLLOW_SIZE.y, HOLLOW_SIZE.z)
-
-  const sampleSdfVolume = Fn(([worldPos]: [Node<'vec3'>]) => {
-    const uvw = clamp(worldPos.sub(bMin).div(bSize), 0.0, 1.0)
-    return texture3D(sdfTex, uvw).level(float(0.0))
-  }, {worldPos: 'vec3', return: 'vec4'})
+  const {lighting, rockAtlas, travertineAtlas, styleMode} = opts
 
   const material = new HollowLightMappedMaterial({
     roughness: 0.62,
@@ -158,36 +153,9 @@ export function createHollowRockMaterial(opts: HollowRockMaterialOptions): Hollo
   material.name = 'Hollow Karst Rock'
 
   const zoneAttr = attribute('aZone', 'vec4')
-  const collarAttr = attribute('aCollar', 'float')
+  const worldN = normalWorldGeometry
 
-  const sdfHere = sampleSdfVolume(positionWorld)
-  const sdfNormal = normalize(sdfHere.xyz)
-  const seamNoise = mx_noise_float(positionWorld.mul(2.3)).mul(0.22)
-  const collarWeight = saturate(collarAttr.add(seamNoise.mul(collarAttr)))
-  const blendedWorldNormal = normalize(mix(normalWorldGeometry, sdfNormal, collarWeight))
-  material.normalNode = transformNormalToView(blendedWorldNormal)
-
-  const safePos = positionWorld.add(sdfNormal.mul(max(sdfHere.w.negate(), float(0.08)).add(0.06)))
-  const skyE = lightProbeGridIrradiance(lighting.skyProbeGrid, safePos, blendedWorldNormal)
-  const fireE = lightProbeGridIrradiance(lighting.fireProbeGrid, safePos, blendedWorldNormal)
-  material.lightMapNode = skyE.add(fireE.mul(lighting.fireIntensity).mul(lighting.fireTint))
-
-  const stepDistances = [0.12, 0.28, 0.55, 0.95, 1.55, 2.35]
-  let occSum: Node<'float'> = float(0.0)
-  let weightSum = 0.0
-  stepDistances.forEach((dist, idx) => {
-    const w = Math.pow(0.7, idx)
-    const phiStep = sampleSdfVolume(positionWorld.add(blendedWorldNormal.mul(dist))).w
-    const deficit = saturate(float(dist).sub(phiStep).div(dist))
-    occSum = occSum.add(deficit.mul(w))
-    weightSum += w
-  })
-  const sdfAO = clamp(float(1.0).sub(occSum.div(weightSum).mul(0.82)), 0.14, 1.0)
-  const collarCrevice = mix(float(1.0), float(0.86), collarWeight.mul(float(1.0).sub(collarWeight)).mul(4.0))
-  material.aoNode = sdfAO.mul(collarCrevice)
-
-  const n = blendedWorldNormal
-  const bw = abs(n).pow(5.0)
+  const bw = abs(worldN).pow(5.0)
   const bSum = bw.x.add(bw.y).add(bw.z).max(1e-4)
   const b = bw.div(bSum)
   const scale = float(0.42)
@@ -204,8 +172,8 @@ export function createHollowRockMaterial(opts: HollowRockMaterialOptions): Hollo
   const detail = mix(rockSample, travSample, zoneAttr.y.mul(0.85).add(zoneAttr.z.mul(0.55)))
 
   const wetness = zoneAttr.w
-  const dryAlbedo = detail.rgb.mul(mix(float(1.0), float(0.92), zoneAttr.x.mul(0.35)))
-  const wetAlbedo = pow(dryAlbedo, vec3(1.45)).mul(0.52)
+  const dryAlbedo = detail.rgb.mul(mix(float(1.0), float(0.92), zoneAttr.x.mul(0.35))).mul(1.2)
+  const wetAlbedo = pow(dryAlbedo, vec3(1.25)).mul(0.75)
   const albedo = mix(dryAlbedo, wetAlbedo, wetness)
 
   const zoneHost = albedo.mul(vec3(0.9, 0.82, 0.72))
@@ -221,14 +189,12 @@ export function createHollowRockMaterial(opts: HollowRockMaterialOptions): Hollo
   material.clearcoatNode = wetness.mul(0.92)
   material.clearcoatRoughnessNode = mix(float(0.12), float(0.04), wetness)
 
-  const coatN = normalize(mix(blendedWorldNormal, vec3(0, 1, 0), wetness.mul(0.35)))
+  const coatN = normalize(mix(worldN, vec3(0, 1, 0), wetness.mul(0.35)))
   material.clearcoatNormalNode = transformNormalToView(coatN)
 
-  const viewDir = normalize(cameraPosition.sub(positionWorld))
-  const edgeGlow = pow(saturate(float(1.0).sub(abs(dot(blendedWorldNormal, viewDir)))), 2.5)
-  material.emissiveNode = mix(color(0xff9438), color(0x6bbbd6), zoneAttr.y)
-    .mul(edgeGlow.mul(zoneAttr.y.add(zoneAttr.z)).mul(0.12))
-    .mul(lighting.fireIntensity.mul(0.35).add(0.65))
+  // Rim emissive off while isolating bake lights (was a fixed cyan/orange edge glow).
+  void lighting
+  material.emissiveNode = null
 
   return material
 }

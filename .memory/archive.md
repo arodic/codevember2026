@@ -259,3 +259,46 @@ Complete log. Entries before 2026-11-12 11:00 were written in the io repo (packa
 - HollowWater: reflector + Beer-Lambert + droplets + CPU capillary ripples (shore mask).
 - HollowVolumetrics: fogNode + additive shaft mesh (in-scene for reflector).
 - Bake progress exposed; CaptureDefaults preroll 6s.
+
+## [hollow] decisions + seed variance
+- Locked: dolly, shallow meniscus, silent, fire behind cam plane.
+- Seed: 5 archetypes + wider spine/sky/rim/cam/track/wall/cascade ranges; fire via look-vector; rimstone either shore; forced shallow basin floor.
+- Hollow applies cinemaTracks on seed change. Tests pass.
+
+## 2026-11-13 [rust][plan][research] Day 11 Rust: SEM rust-formation plan
+- Ask: plan close-up animation of rust forming, seen by SEM; 4 user refs (~/Downloads rust1-4, watermarked stock, kept out of repo) + Maxon CRS page; deep research; most accurate CG techniques.
+- Maxon page = penetrant marketing; EAG BEC 20 kV x30/x150 cross-sections: 172-296 µm laminated rust, wavy bands, cracks parallel to surface, voids, tongues ~100 µm into steel -> FIB section epilogue (band per wet/dry cycle).
+- Key facts gathered: Frontiers Chem 2021 microdroplets (pure Fe, 3.5% NaCl, 85% RH): immediate, 44-328 µm from edge (5-45 min), cathodic/alkaline, Na+ via thin film, 0.36 V, 764/152 µA/cm2; Li&Hihara critical drop 40-100 µm (low-C steel); Li&Hihara 2012 pits in minutes, GR by pit, lepido outside; MnS trench (Muto/Chiba); Stratmann wet/dry; Stumm-Lee k 8e13 (t1/2 4 min pH7); NaCl DRH 75.3 / ERH ~45; akaganeite RH>=80% + Cl>=60 mg/m2/d; ISO 9223 C5 80-200 µm/yr; goethite cotton balls + pointed flowers 5-10 µm (Antunes&Costa IPEN PDF, scanned, read via Read pages); lepido globular+laminar (de la Fuente/Morcillo 2016); SEM secant law (Cazaux), light-optical analogy (Goldstein), Reuter eta, Kanaya-Okayama.
+- Computed: molar-volume ratios magnetite 2.10, goethite 2.94, lepido 3.06, akag/ferrihydrite ~3.5; eta steel .28 FeOOH .22 NaCl .17 water .08; range 15 kV Fe 1.0 µm FeOOH 1.6; i_lim 10 µm film 1.9 mA/cm2; Wagner length ~2 mm (h 10 µm) vs ~0.2 mm (0.1 µm film) -> potential solve matters only in spreading film.
+- Plan: bake-then-evaluate GPU sim (512² 1.25 µm grid; multigrid potential + backward-Euler transport; Tafel kinetics; phase rules; snapshots StorageArrayTexture ~84 MB; nucleation event append buffer) -> height-field steel/crust + instanced habits (rosettes, cotton balls, spindles, octahedra, GR hexagons, NaCl hoppers/dendrites) + SEM signal in-material (secant SE, edge/thin, BSE, detector march + shadow map, cavity GTAO) + SemImage effect (shot noise per scan frame seeded by timeline frame, slow-scan reveal, data bar) + stage camera at virtual WD 10 mm; capture lens = beam cone (blades 0), needs new CapturePrepare hook.
+- Rejected: 90-day log clock (RH cycles strobe at ~4 Hz at end) -> 30 days ~5 s/day. Jacobi-only transport (needs ~1e4+ iters per solve) -> multigrid. Per-droplet lumped potential with atomics -> unnecessary with Newton-linearized screened Poisson (patches balance by construction).
+- Research access: MDPI 403, digital.csic.es Anubis block, revistademetalurgia TLS fail, some PMC IDs captcha; PMC6895721/6829510 + Frontiers OK. WebSearch blocked twice by false-positive classifier on "micro-droplets ... spreading" phrasing -> rephrase by author/journal.
+- Verified r187: IndirectStorageBufferAttribute + BufferGeometry.setIndirect, StorageArrayTexture, Storage3DTexture, atomicAdd, shadow(light) TSL, GTAONode/TRAANode/FilmNode exist.
+
+## [hollow] Phase 2 wired into Hollow.ts
+- Replaced Phase 1 blockout lights/materials with HollowLighting/Water/Volumetrics/Material.
+- Renamed private field hollowLighting (Document.lighting is RenderLighting).
+- Bake on renderer init + rebuild; fire flicker + droplets in onAnimate.
+- typecheck/lint/hollow tests pass. Needs visual bake polish.
+
+## 2026-11-13 [rust][decisions] Day 11 Rust open Qs answered
+- User: 1 false color; 2 one large crystal but NOT isolated, view can expand to surrounding surface; 3 "30 days in 5 s sounds good but adjustable" (read as 30 d at ~5 s/day; both params exposed); 4 data bar optional; 5 no cross-section shot, Maxon xsections = reference/guidance only; 6 loop fade + new seed yes; 7 silent.
+- Plan changes: salt scatter (log-normal 1-40 µm, ~20 µg/cm2, neighbours 15-25 µm rust + rings merge, coalescence, daily deposition `chlorideDeposition` ~100 mg/m2/d); nested one-way grids (surround 512² @5 µm = 2.56 mm, core 512² @1.25 µm); stage `Surface` mode, mag x50-x5000 (FOV to ~14°, slight perspective like real low-mag SEM); `dataBar` off by default; FIB trench removed -> inner bands on crack walls/flake edges/broken tubercle caps + debug `fieldView: 'Section'`; session shot 5 = wide pull-out, 6 = back in + fade + new seed; todo id rust-phase4-section-capture -> rust-phase4-session-capture; Open Questions -> Locked Decisions.
+- Pace change = remap only (bake in exposure time); more days extends bake.
+
+## [hollow] fix WebGPU reflector validation
+- Console spam: TextureBinding|RenderAttachment — rimstone sampled same reflector RT while lake mirror pass wrote it.
+- Fix: rimstone uses sky-glint fresnel only; reflector parented to lakeMesh; only lake samples reflector.
+- Also switched GI to single visible LightProbeGrid + hemisphere fill (dual lightMapNode path left ceilings black).
+
+## 2026-11-13 [hollow][lighting] static tweak/rebake mode
+- Bloom + TimelineFade removed from Hollow effects while tuning.
+- HollowLightLevels + inspector Lights sliders; rebake applies levels then bakes.
+- Bake: skylight + sky area + fire area (+ fill); fire point off.
+- Runtime: static fire point (no flicker); fire area stays for LTC.
+- updateFire removed from onAnimate.
+
+## 2026-11-13 [hollow][lighting] per-light bake isolation
+- Bug: rebake inherited prior SH/env → successive zero-light bakes got darker gradually; bluish residual from rock rim emissive + sky portal + teal bg + ungated shafts/rimstone glint.
+- Fix: clear stage disposes+recreates LightProbeGrid + clears PMREM env before direct; zero-intensity lights hidden; skyEmitter gates portal/shafts/rimstone; emissive rim off; bg #000.
+- Solo-light workflow: zero all → rebake (black) → enable one → rebake.

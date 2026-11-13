@@ -46,3 +46,19 @@ Curated, persistent. Caveman.
 - **`NodeMaterial.fragmentNode` + MRT (`traa` axis views) trap:** in Three r187 `NodeMaterial.setup()`, setting `material.fragmentNode` bypasses the MRT block (`if (this.fragmentNode === null) { ... mrt ... }`), AND `WebGPUBackend.getRenderCacheKey` checks only `textures[0]` format, not attachment count. Result: 1-target (`Active`/`Perspective`) and 2-target (`traa` ortho axis views: `output` + `velocity`) share one `GPURenderPipeline` (`colorTargets.length = 1`) -> WebGPU attachment-state validation error in non-fullscreen mode. Fix: use `material.colorNode` (keeps `fragmentNode === null` so MRT runs) + `material.positionNode` (with `positionPrevious.assign(worldVertex)` so `VelocityNode` doesn't smear) + parallel-ray `isOrtho` ribbon basis.
 
 
+
+#### Codevember Rust (plan 2026-11-13, src/days/rust planned)
+
+- **Bake-then-evaluate:** GPU sim ahead of playhead -> per-cycle snapshots (crust/steel heights) + nucleation event buffer; render = f(timeline time) -> scrub + any-range capture, unlike Feather. Interp snapshots on cycle growth curve (growth mostly in drying, Stratmann).
+- **Thin-film electrochem:** under drop IR drop small (Wagner ~2 mm at h 10 µm) -> separation by O2 access + pH passivity + Cl; in spreading film (0.1 µm) potential matters. Solve div(kappa h grad phi) = i_a + i_c with Newton screening, multigrid (Jacobi alone way too slow), each wet patch self-balances charge.
+- **SEM look = detector signal, not lighting:** S ~ delta0 sec(theta) (edge, thin, detector visibility, cavity) + BSE eta(Z). Light-optical analogy: view from beam, light from ETD, soft shadows. Range sets edge width (K-O).
+- **Capture:** SEM shot noise must seed by timeline frame (not subframe) or averaging kills it. Lens = beam cone, blades 0. Needs CapturePrepare hook so capture waits for bake.
+- **Rust decisions (user 2026-11-13):** false color default (Gray/Duotone modes); hero crystal not isolated (salt scatter, wide `Surface` view, nested surround grid); 30 d × 5 s/day default, `exposureDays`/`secondsPerDay` adjustable (pace = remap only); `dataBar` optional off; no section shot (Maxon xsections guide crack walls/flake edges + debug slice only); loop fade + new seed; silent.
+
+#### Codevember Hollow (src/days/hollow)
+
+- **Bake vs realtime fire:** bake with RectArea fire (point off) so GI authored from area; after bake, static PointLight on (no flicker). Don't dual-bind lightMapNode grids — single visible LightProbeGrid + fill.
+- **Reflector:** only lake samples ReflectorNode RT; rimstone = sky-glint fresnel. Parent reflector to lakeMesh.
+- **Rock shader:** no SDF texture3D in material (normalize(0) NaN kills lighting). Triplanar + clearcoat; SDF collar later.
+- **Tweak mode:** bloom/fade off; Lights inspector → `setLevels` → rebake.
+- **Bake isolation:** clear stage = dispose+recreate LightProbeGrid + drop env before direct (no clear API). Zero intensity → light.visible false. Residual cyan was rock emissive rim + sky portal + teal bg — gate portal/shafts/rimstone via `skyEmitter`.

@@ -15,12 +15,14 @@ export class HollowVolumetrics {
 
   readonly shaftMesh: Mesh<BoxGeometry, MeshBasicNodeMaterial>
   private readonly waterLevel: UniformNode<'float', number>
+  private readonly skyEmitter: UniformNode<'float', number>
   private readonly shaftIntensity = uniform(1.15)
   private readonly shaftCenter = uniform(new Vector3())
   private readonly shaftDir = uniform(new Vector3(0.1, 0.8, -0.5))
 
-  constructor(waterLevel: UniformNode<'float', number>) {
+  constructor(waterLevel: UniformNode<'float', number>, skyEmitter?: UniformNode<'float', number>) {
     this.waterLevel = waterLevel
+    this.skyEmitter = skyEmitter ?? uniform(1.0)
     this.shaftMesh = this.createShaftMesh()
   }
 
@@ -89,7 +91,7 @@ export class HollowVolumetrics {
         pos.assign(pos.add(view.mul(stepLen.negate())))
       })
       const a = saturate(density.mul(0.2))
-      return color(0x6bbbd6).mul(2.1).mul(this.shaftIntensity).mul(a)
+      return color(0x6bbbd6).mul(2.1).mul(this.shaftIntensity).mul(this.skyEmitter).mul(a)
     })()
 
     mat.colorNode = raymarch

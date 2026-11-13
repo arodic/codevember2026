@@ -4,9 +4,10 @@ import {
 } from 'three/webgpu'
 import {
   attribute, cameraPosition, color, dot, exp, float, mix, normalize, positionLocal, positionWorld, pow, saturate,
-  smoothstep, texture, transformNormalToView, vec2, vec3,
+  smoothstep, texture, transformNormalToView, uniform, vec2, vec3,
 } from 'three/tsl'
 import { reflector } from 'three/tsl'
+import type {UniformNode} from 'three/webgpu'
 import { HollowField, createHollowRandom } from './HollowField.js'
 
 const WAVE_RES = 256
@@ -44,12 +45,17 @@ export class HollowWater {
   private readonly _p = new Vector3()
   private readonly waveOrigin = new Vector2(-10, -12)
   private readonly waveExtent = new Vector2(20, 16)
+  private readonly skyEmitter: UniformNode<'float', number>
 
-  constructor(field: HollowField) {
+  constructor(field: HollowField, skyEmitter?: UniformNode<'float', number>) {
     this.field = field
+    this.skyEmitter = skyEmitter ?? uniform(1.0)
 
+    // `bounces: false` — only the lake material may sample this RT. Any other material reading it during the
+    // mirror pass hits WebGPU TextureBinding|RenderAttachment validation and drops the frame (black scene).
     this.lakeReflector = reflector({resolutionScale: 0.75, bounces: false})
     this.lakeReflector.target.name = 'Lake Reflector'
+    // ReflectorNode treats target local +Z as the mirror normal; lake mesh is Y-up (unrotated).
     this.lakeReflector.target.rotateX(-Math.PI / 2)
     this.lakeReflector.target.userData.selectable = false
 
@@ -131,12 +137,16 @@ export class HollowWater {
     })
     material.name = 'Hollow Rimstone Pool'
 
+    // Do NOT sample `lakeReflector` here: ReflectorNode only hides the triggering material while rendering the
+    // mirror pass. A second material reading that RT in the same pass triggers WebGPU
+    // TextureBinding|RenderAttachment validation errors and blacks out the frame.
     const sinterFloor = color(0xb97c3e)
     const amberPool = color(0x9e6329)
+    const skyGlint = color(0x6bbbd6).mul(0.55).mul(this.skyEmitter)
     const viewDir = normalize(cameraPosition.sub(positionWorld))
     const fresnel = float(0.03).add(float(0.97).mul(pow(float(1.0).sub(saturate(viewDir.y)), 5.0)))
     const base = mix(sinterFloor, amberPool, smoothstep(0.01, 0.09, waterDepth))
-    material.colorNode = mix(base, this.lakeReflector.rgb.mul(0.85), fresnel.mul(0.65))
+    material.colorNode = mix(base, skyGlint, fresnel.mul(0.55).mul(this.skyEmitter))
     return material
   }
 

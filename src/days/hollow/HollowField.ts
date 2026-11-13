@@ -41,7 +41,7 @@ export interface HollowFieldParams {
 }
 
 export const DEFAULT_HOLLOW_PARAMS: HollowFieldParams = {
-  seed: 7,
+  seed: 1056,
   cavernWidth: 1.0,
   vaultHeight: 1.0,
   meander: 1.0,
@@ -131,8 +131,10 @@ export class HollowField {
   }
   /** `+1` = hero boulder / right bench on +X, `-1` = mirrored. */
   heroSide = 1
-  /** Seed density bias for speleothem / boulder placement (`~0.55..1.7`). */
+  /** Seed density bias for speleothem / boulder placement (`~0.45..2.0`). */
   featureDensity = 1.0
+  /** Seed-picked dolly / truck / pan magnitudes applied by `Hollow` on seed change. */
+  readonly cinemaTracks = {forward: 1.1, lateral: -0.42, lookDrift: 0.22}
 
   private readonly lattice = new Float32Array(LATTICE_SIZE * LATTICE_SIZE * LATTICE_SIZE)
   private spinePhase1 = 0
@@ -161,6 +163,15 @@ export class HollowField {
   private rightBenchStrength = 1.0
   private thalwegBias = 0.25
   private vaultCrown = 5.05
+  /** Seed-internal cavern proportion multipliers (on top of inspector params). */
+  private widthBias = 1.0
+  private vaultBias = 1.0
+  private meanderBias = 1.0
+  private wallLeftSpan = 6.6
+  private wallRightSpan = 5.5
+  private lakeFrontZ = 3.2
+  private lakeBackZ = -11.5
+  private channelDepth = 1.55
   private fireAlcoveRx = 2.8
   private fireAlcoveRy = 2.1
   private fireAlcoveRz = 2.6
@@ -193,17 +204,34 @@ export class HollowField {
       this.lattice[i] = rand() * 2.0 - 1.0
     }
 
+    // Discrete composition archetype — changes the *kind* of cavern, not just noise phases
+    const archetype = Math.floor(rand() * 5)
+    // 0 classic, 1 deep throat, 2 wide grotto, 3 gallery-dominant, 4 cascade cathedral
+    this.widthBias = archetype === 2 ? 1.15 + rand() * 0.35
+      : archetype === 1 ? 0.72 + rand() * 0.22
+        : 0.82 + rand() * 0.45
+    this.vaultBias = archetype === 4 ? 1.15 + rand() * 0.4
+      : archetype === 1 ? 0.78 + rand() * 0.28
+        : 0.85 + rand() * 0.45
+    this.meanderBias = archetype === 1 ? 0.55 + rand() * 0.55
+      : 0.7 + rand() * 1.15
+    this.wallLeftSpan = (archetype === 3 ? 7.4 : 5.4) + rand() * 3.2
+    this.wallRightSpan = (archetype === 2 ? 6.8 : 4.4) + rand() * 2.8
+    this.channelDepth = 1.05 + rand() * 1.35
+    this.lakeFrontZ = 1.8 + rand() * 2.8
+    this.lakeBackZ = -8.5 - rand() * 7.5
+
     // --- Seed reshuffles major composition landmarks (not just micro-noise phases) ---
     this.spinePhase1 = rand() * Math.PI * 2
     this.spinePhase2 = rand() * Math.PI * 2
-    this.spineAmp1 = 0.35 + rand() * 1.55
-    this.spineAmp2 = 0.45 + rand() * 1.1
-    this.spineFreq1 = 0.11 + rand() * 0.18
-    this.spineFreq2 = 0.09 + rand() * 0.22
-    this.spineBias = (rand() - 0.5) * 4.8
-    this.rearSwing = 0.4 + rand() * 2.4
-    // Occasional mirrored S-bend so left/right gallery dominance flips with seed
-    if (rand() < 0.42) {
+    this.spineAmp1 = 0.55 + rand() * 2.4
+    this.spineAmp2 = 0.55 + rand() * 1.85
+    this.spineFreq1 = 0.08 + rand() * 0.26
+    this.spineFreq2 = 0.06 + rand() * 0.28
+    this.spineBias = (rand() - 0.5) * 8.5
+    this.rearSwing = 0.6 + rand() * 3.6
+    // Mirror S-bend so left/right gallery dominance flips with seed
+    if (rand() < 0.5) {
       this.spineAmp1 *= -1
       this.spineAmp2 *= -1
       this.rearSwing *= -1
@@ -211,76 +239,112 @@ export class HollowField {
 
     this.rimPhase1 = rand() * Math.PI * 2
     this.rimPhase2 = rand() * Math.PI * 2
-    const rimYaw = (rand() - 0.5) * 1.7
+    const rimYaw = (rand() - 0.5) * 2.4
     this.rimRotC = Math.cos(rimYaw)
     this.rimRotS = Math.sin(rimYaw)
-    this.rimRx = 1.55 + rand() * 1.35
-    this.rimRz = 1.05 + rand() * 0.95
+    this.rimRx = 1.25 + rand() * 2.15
+    this.rimRz = 0.85 + rand() * 1.55
 
     this.ribPhase = rand() * Math.PI * 2
-    this.ribDiagX = 0.45 + rand() * 0.7
-    this.ribDiagZ = 0.35 + rand() * 0.7
+    this.ribDiagX = 0.35 + rand() * 1.05
+    this.ribDiagZ = 0.25 + rand() * 1.0
     if (rand() < 0.5) this.ribDiagX *= -1
-    this.browZ = -9.5 - rand() * 6.5
+    this.browZ = -7.5 - rand() * 10.5
     this.bedOffset = rand() * 5.0
 
-    this.cascadeStartZ = -7.5 - rand() * 5.5
-    this.cascadeEndZ = this.cascadeStartZ - (7.5 + rand() * 6.5)
-    this.cascadeRise = 1.55 + rand() * 1.85
-    this.leftGalleryStrength = 0.35 + rand() * 1.35
-    this.rightBenchStrength = 0.25 + rand() * 1.45
-    this.thalwegBias = (rand() - 0.5) * 0.9
-    this.vaultCrown = 4.2 + rand() * 2.4
+    this.cascadeStartZ = -5.5 - rand() * 8.5
+    this.cascadeEndZ = this.cascadeStartZ - (6.0 + rand() * 10.5)
+    this.cascadeRise = 1.15 + rand() * 3.1
+    this.leftGalleryStrength = archetype === 3 ? 1.1 + rand() * 1.2 : 0.15 + rand() * 1.75
+    this.rightBenchStrength = 0.1 + rand() * 1.85
+    this.thalwegBias = (rand() - 0.5) * 1.45
+    this.vaultCrown = 3.6 + rand() * 3.8
     this.heroSide = rand() < 0.5 ? 1 : -1
-    this.featureDensity = 0.55 + rand() * 1.15
+    this.featureDensity = 0.45 + rand() * 1.55
 
-    // Cinema pose first — fire must stay behind this plane for every seed
-    const startZ = 5.4 + rand() * 3.6
-    const startX = (rand() - 0.5) * 3.8
-    const lookZ = -8.5 - rand() * 8.5
-    const lookX = this.spineBias * 0.35 + (rand() - 0.5) * 3.2
+    // Cinema pad first — fire must stay behind this plane for every seed
+    const startZ = 4.2 + rand() * 5.8
+    const startX = this.spineBias * 0.15 + (rand() - 0.5) * 6.5
+    const lookAim = Math.floor(rand() * 3) // 0 mid-lake, 1 cascade brow, 2 skylight-biased
+    const lookZ = lookAim === 0 ? -6.0 - rand() * 5.5
+      : lookAim === 1 ? this.cascadeStartZ - rand() * 4.0
+        : this.cascadeEndZ + 2.0 + rand() * 4.0
+    const lookX = this.spineBias * (0.25 + rand() * 0.55) + (rand() - 0.5) * 5.5
     this.cinemaPose.startX = startX
     this.cinemaPose.startZ = startZ
     this.cinemaPose.targetX = lookX
-    this.cinemaPose.targetY = 0.85 + rand() * 1.1
-    this.cinemaPose.targetZ = lookZ
-    this.cinemaPose.height = 1.15 + rand() * 1.35
-    this.cinemaPose.fov = 32 + rand() * 16
+    this.cinemaPose.targetY = 0.55 + rand() * 2.2
+    this.cinemaPose.targetZ = Math.min(lookZ, startZ - 6.0)
+    this.cinemaPose.height = 0.85 + rand() * 2.15
+    this.cinemaPose.fov = 28 + rand() * 22
+    this.cinemaTracks.forward = 0.35 + rand() * 2.0
+    this.cinemaTracks.lateral = (rand() - 0.5) * 2.2
+    this.cinemaTracks.lookDrift = (rand() - 0.5) * 1.4
 
-    // Warm fire: behind camera (+Z of startZ), usually camera-left, sometimes camera-right
-    const fireSide = rand() < 0.78 ? -1 : 1
-    const fireBehind = 2.2 + rand() * 3.8
+    // Warm fire: strictly behind cinema look plane (never in widescreen FOV), usually camera-left
+    const camY = this.params.waterLevel + this.cinemaPose.height
+    const lookDx = this.cinemaPose.targetX - startX
+    const lookDy = this.cinemaPose.targetY - camY
+    const lookDz = this.cinemaPose.targetZ - startZ
+    const lookLen = Math.hypot(lookDx, lookDy, lookDz) || 1
+    const lx = lookDx / lookLen
+    const ly = lookDy / lookLen
+    const lz = lookDz / lookLen
+    // Camera right ≈ look × up
+    let rx = lz
+    let rz = -lx
+    const rLen = Math.hypot(rx, rz) || 1
+    rx /= rLen
+    rz /= rLen
+    const fireSide = rand() < 0.72 ? -1 : 1
+    const behind = 3.4 + rand() * 5.5
+    const side = fireSide * (3.6 + rand() * 5.5)
     this.fireOrigin.set(
-      startX + fireSide * (4.2 + rand() * 4.5),
-      this.params.waterLevel + 1.15 + rand() * 1.65,
-      startZ + fireBehind,
+      startX - lx * behind + rx * side,
+      this.params.waterLevel + 0.95 + rand() * 1.85,
+      startZ - lz * behind + rz * side,
     )
-    this.fireAlcoveRx = 2.2 + rand() * 1.8
-    this.fireAlcoveRy = 1.6 + rand() * 1.4
-    this.fireAlcoveRz = 2.0 + rand() * 1.8
-    // Spill-shaping buttress between fire and framed cavern (lets light flood forward, keeps alcove out of view)
+    // Re-project so fire stays strictly behind the look plane even after world clamps
+    this.fireOrigin.x = MathUtils.clamp(this.fireOrigin.x, HOLLOW_MIN.x + 2.5, HOLLOW_MAX.x - 2.5)
+    this.fireOrigin.z = MathUtils.clamp(this.fireOrigin.z, startZ + 2.2, HOLLOW_MAX.z - 1.5)
+    {
+      const along = (this.fireOrigin.x - startX) * lx
+        + (this.fireOrigin.y - camY) * ly
+        + (this.fireOrigin.z - startZ) * lz
+      if (along > -2.8) {
+        const push = along + 2.8
+        this.fireOrigin.x -= lx * push
+        this.fireOrigin.y -= ly * push
+        this.fireOrigin.z -= lz * push
+        this.fireOrigin.z = Math.max(this.fireOrigin.z, startZ + 2.2)
+      }
+    }
+    this.fireAlcoveRx = 2.0 + rand() * 2.4
+    this.fireAlcoveRy = 1.45 + rand() * 1.7
+    this.fireAlcoveRz = 1.8 + rand() * 2.4
+    // Spill-shaping buttress between fire and framed cavern (alcove stays out of view; light floods forward)
     this.spillPillar.set(
-      MathUtils.lerp(this.fireOrigin.x, startX, 0.45 + rand() * 0.2),
-      this.params.waterLevel + 0.9 + rand() * 1.1,
-      MathUtils.lerp(this.fireOrigin.z, startZ - 1.2, 0.35 + rand() * 0.25),
+      MathUtils.lerp(this.fireOrigin.x, startX, 0.38 + rand() * 0.28),
+      this.params.waterLevel + 0.75 + rand() * 1.35,
+      MathUtils.lerp(this.fireOrigin.z, startZ - 0.6, 0.28 + rand() * 0.3),
     )
 
-    // Skylight opening wanders across the rear vault
+    // Skylight opening wanders widely across the rear vault
     this.skylightCenter.set(
-      this.spineBias + (rand() - 0.5) * 7.5,
-      8.6 + rand() * 2.2,
-      -15.5 - rand() * 8.5,
+      this.spineBias + (rand() - 0.5) * 11.0,
+      7.8 + rand() * 3.0,
+      MathUtils.clamp(this.cascadeEndZ + (rand() - 0.5) * 4.5, -26.5, -12.0),
     )
-    const skyAimX = (rand() - 0.5) * 0.55
-    const skyAimZ = -0.25 - rand() * 0.55
-    this.skylightDirection.set(skyAimX, 0.55 + rand() * 0.4, skyAimZ).normalize()
+    const skyAimX = (rand() - 0.5) * 0.85
+    const skyAimZ = -0.15 - rand() * 0.7
+    this.skylightDirection.set(skyAimX, 0.45 + rand() * 0.5, skyAimZ).normalize()
 
-    // Rimstone dam anchors along the near shore, opposite the hero boulder side for balance
-    const rimAlong = -0.4 + rand() * 3.2
+    // Rimstone dam: near shore, opposite hero boulder; may sit camera-left OR camera-right
+    const rimSide = rand() < 0.82 ? -this.heroSide : this.heroSide
     this.rimstoneCenter.set(
-      startX - this.heroSide * (1.1 + rand() * 2.6) + (rand() - 0.5) * 1.2,
+      startX + rimSide * (0.6 + rand() * 3.8) + (rand() - 0.5) * 1.8,
       this.params.waterLevel,
-      MathUtils.clamp(rimAlong + (rand() - 0.5) * 1.4, -1.2, 3.6),
+      MathUtils.clamp(-1.8 + rand() * 5.2, -2.4, 4.2),
     )
 
     this.boulderProxies = []
@@ -348,12 +412,12 @@ export class HollowField {
 
   /** Meandering cavern centerline X coordinate along Z (`z = +8` foreground -> `z = -24` rear chamber). */
   spineX(z: number): number {
-    const m = this.params.meander
+    const m = this.params.meander * this.meanderBias
     const sBend = -this.spineAmp1 * Math.sin((z + 1.5) * this.spineFreq1)
       + this.rearSwing * smoothstep(-8.0, -18.5, z)
     const seedSway = this.spineAmp2 * 0.22 * Math.sin(z * this.spineFreq2 + this.spinePhase1)
       + this.spineAmp2 * 0.11 * Math.cos(z * (this.spineFreq2 * 1.9) + this.spinePhase2)
-    return this.spineBias + sBend * m + seedSway * MathUtils.clamp(m, 0.25, 1.5)
+    return this.spineBias + sBend * m + seedSway * MathUtils.clamp(m, 0.25, 1.8)
   }
 
   /** Normalized radial coordinate `u` of the foreground kidney-shaped rimstone (`gour`) pool (`u < 1` = inside lip). */
@@ -387,13 +451,13 @@ export class HollowField {
    */
   floorHeightAt(x: number, z: number, withDetail = true): number {
     const wl = this.params.waterLevel
-    const widthScale = this.params.cavernWidth
+    const widthScale = this.params.cavernWidth * this.widthBias
     const cx = this.spineX(z)
     const dx = (x - cx) / widthScale
 
     // 1. Deep meandering lake channel: asymmetric thalweg biased by seed
     const thalwegOffset = dx - this.thalwegBias
-    const channelProfile = -1.55 + 0.16 * thalwegOffset * thalwegOffset
+    const channelProfile = -this.channelDepth + 0.16 * thalwegOffset * thalwegOffset
       + (dx * this.thalwegBias < 0 ? 0.045 * dx * dx : 0.11 * dx * dx)
     let floorY = wl + channelProfile
 
@@ -443,8 +507,9 @@ export class HollowField {
       floorY = MathUtils.lerp(floorY, Math.max(floorY, cascadeY), smoothstep(blendZ0, blendZ1, z))
     }
 
-    // 6. Lower-left foreground stepped rimstone (`gour`) dam & shallow sinter basin
-    if (this.params.rimstoneScale > 0.05 && z > -2.5 && z < 4.5 && x < 0.8) {
+    // 6. Foreground stepped rimstone (`gour`) dam & shallow sinter basin (either shore — seed-placed)
+    // Interior always stays a shallow meniscus above `waterLevel` (overrides benches that might otherwise lift it).
+    if (this.params.rimstoneScale > 0.05) {
       const u = this.rimstoneCoord(x, z)
       if (u < 1.45) {
         const basinFloor = wl + 0.025
@@ -453,9 +518,14 @@ export class HollowField {
         const crenulation = withDetail ? 0.012 * this.noise3(x * 3.2, 0.5, z * 3.2) : 0.0
         const damSurface = basinFloor + (RIMSTONE_LIP_HEIGHT - 0.025 + crenulation) * lipBell
         const apronFade = 1.0 - smoothstep(0.95, 1.38, u)
-        const targetRimY = u < 0.92 ? damSurface : MathUtils.lerp(floorY, damSurface, apronFade)
-        const blendIn = 1.0 - smoothstep(1.02, 1.40, u)
-        floorY = MathUtils.lerp(floorY, Math.max(floorY, targetRimY), blendIn)
+        if (u < 0.92) {
+          // Inside dam: blend toward shallow basin / lip crest, never inherit elevated bench floors
+          floorY = MathUtils.lerp(basinFloor, damSurface, MathUtils.clamp(lipBell, 0, 1))
+        } else {
+          const targetRimY = MathUtils.lerp(floorY, damSurface, apronFade)
+          const blendIn = 1.0 - smoothstep(1.02, 1.40, u)
+          floorY = MathUtils.lerp(floorY, Math.max(floorY, targetRimY), blendIn)
+        }
       }
     }
 
@@ -472,7 +542,7 @@ export class HollowField {
 
   /** Water depth (`> 0` where open main-lake water covers the bed, `0` on dry land or inside the stepped rimstone dam). */
   lakeDepthAt(x: number, z: number): number {
-    if (z < -11.5 || z > 3.2) return 0.0
+    if (z < this.lakeBackZ || z > this.lakeFrontZ) return 0.0
     if (this.rimstoneCoord(x, z) < 1.02) return 0.0
     return Math.max(0.0, this.params.waterLevel - this.floorHeightAt(x, z, true))
   }
@@ -494,8 +564,8 @@ export class HollowField {
 
   /** Height of the main cavern ceiling vault at `(x, z)` (excluding the skylight chimney cutout). */
   ceilingHeightAt(x: number, z: number, withDetail = true): number {
-    const vh = this.params.vaultHeight
-    const widthScale = this.params.cavernWidth
+    const vh = this.params.vaultHeight * this.vaultBias
+    const widthScale = this.params.cavernWidth * this.widthBias
     const cx = this.spineX(z)
     const dx = (x - cx) / (6.6 * widthScale)
 
@@ -515,12 +585,15 @@ export class HollowField {
 
   /** Fast smooth macro SDF (`phi > 0` = air, `phi < 0` = rock) used to cull far-rock voxels before noise evaluation. */
   macroSample(x: number, y: number, z: number): number {
-    const widthScale = this.params.cavernWidth
+    const widthScale = this.params.cavernWidth * this.widthBias
     const cx = this.spineX(z)
 
-    // Lateral wall envelope (wider in main grotto & left gallery, opening toward rear cascade chamber)
-    const leftSpan = (6.6 + 1.7 * smoothstep(-0.5, -5.0, z) * (1.0 - smoothstep(-9.5, -13.5, z))) * widthScale
-    const rightSpan = (5.5 - 0.7 * smoothstep(-9.0, -16.0, z)) * widthScale
+    // Lateral wall envelope — seed spans + gallery flare; opens toward rear cascade chamber
+    const galleryFlare = 1.7 * smoothstep(-0.5, -5.0, z) * (1.0 - smoothstep(-9.5, -13.5, z))
+      * MathUtils.clamp(this.leftGalleryStrength, 0.2, 1.6)
+    const leftSpan = (this.wallLeftSpan + galleryFlare) * widthScale
+    const rightSpan = (this.wallRightSpan - 0.7 * smoothstep(-9.0, -16.0, z)
+      + 0.9 * MathUtils.clamp(this.rightBenchStrength - 0.5, 0, 1.2)) * widthScale
     const wallLeft = x - (cx - leftSpan)
     const wallRight = (cx + rightSpan) - x
     const zBack = z - (-24.8)
@@ -531,7 +604,7 @@ export class HollowField {
     const ceilD = this.ceilingHeightAt(x, z, false) - y
     let phi = smin(horiz, smin(floorD, ceilD, 1.1), 1.15)
 
-    // Warm fire alcove behind the cinema camera plane — open air around `fireOrigin`, spilling light forward (−Z)
+    // Warm fire alcove behind the cinema camera plane — open air around `fireOrigin`, spilling light forward
     const fx = (x - this.fireOrigin.x) / this.fireAlcoveRx
     const fy = (y - (this.fireOrigin.y + 0.25)) / this.fireAlcoveRy
     const fz = (z - this.fireOrigin.z) / this.fireAlcoveRz
