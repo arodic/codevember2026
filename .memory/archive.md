@@ -167,3 +167,95 @@ Complete log. Entries before 2026-11-12 11:00 were written in the io repo (packa
 - CaptureListener.captureChanged('settle'|'subframes'|'off') (Capture.ts). Fold: captureStage; capturing -> no terrain drafts (terrainDraft = animating && off); 'subframes' -> updateLighting held (no history cap from change/playing/drift, no RESHAPED cap, updates every draw) so GI keeps refining across subframes.
 - Verified headless dev: N=8 frame brightness = N=1; ridge stair-steps gone; 2.4 s vs 1.8 s per frame at settle 1.5. Camera view disabled + aspect 2.39 after.
 - Why not CCapture motionBlurFrames: averages 8-bit tone-mapped canvas -> clipped highlights blur to grey; clock hijack conflicts with settle.
+
+## 2026-11-12 [feather][plan][physics][bsdf][dof] Day 12 (Feather) architectural plan
+- User: plan Feather sketch in Codevember.plan.md — microscopic feather detail + 2-layer strand dynamics (stems w/ variable barbule-envelope collisions + smaller hairs w/ wavelike air response, gestures & collisions), weightless connected-object feel, photorealistic match to reference macro image, static camera, exact soft gradient, real-time DoF + multi-sampled real DoF in capture.
+- Measured reference image (`1024x582`, aspect `1.759`): plumulaceous white feather barbs/barbules fanning upward-left; sRGB backdrop `#46658f` (bot-left), `#4b6993` (top-left), `#4c6c93` (top-center), elliptical upper-right backlight glow `#85a0c2`; bright multi-scattered plume core `#bfcde3`..white, cool inner shadow `#839cbc`.
+- Rejected stock `DepthOfFieldNode.js`: unweighted `blur64` leaks sharp bright focal hairs into far blur; `blur16` uses `max()` blocky dilation; near blend ignores `bokehScale` (TODO in three). Custom `MacroDepthOfField` `Effect` uses exact thin-lens CoC from `(fov, focusDistance, aperture)`, matching capture 1:1.
+- Multi-sampled physical capture DoF math verified against `PerspectiveCamera.updateProjectionMatrix` (`left += offsetX*w/fullW`, `top -= offsetY*h/fullH`) and `View._fromSceneCamera`: camera shifts in lens plane `P0 + dx*R + dy*U` with off-axis shear `offsetX = jitterX - (dx/W_f)*width`, `offsetY = jitterY + (dy/H_f)*fullHeight` -> entire flat focal plane `z = d_f` stays exact, deterministic 5D Halton/Shirley-Chiu disk avoids temporal Monte Carlo boil; `MacroDepthOfField` bypassed during `captureChanged`.
+- 2-layer GPU physics: (L0/L1) Cosserat/XPBD rachis+barbs, 2-way barb->rachis torque for connected common-fate motion, exact exponential Stokes drag (`v = u_air + (v - u_air)*exp(-gamma*dt)`, unconditional stability at microgram mass), nonlinear spongy `R_env(s)` steric collisions outputting contact vector `c_{i,j}`; (L2) 128-thread per-vane workgroups, 2-mode cantilever barbules driven by stem whip + curl-noise air waves + `c_i(s_k)` splay + shared-memory `q1[lid+-1]` neighbor steric ordering; gestures via `DrawnViewport.inputRouter` below `NavigationBehavior` (`NavigationBehavior` auto-disables on scene-camera views `#Fullscreen`/`#Active`).
+- Fiber optics: Marschner/Chiang dielectric beta-keratin (`eta=1.55`, `R/TT/TRT` + medullary pith core), `Storage3DTexture` (`96x64x64`, `HalfFloatType`, `generateMipmaps=false` — confirmed in three 0.187.0) dual-scattering optical-depth volume, `1.35 px` energy-conserving ribbon clamping, 1-workgroup GPU bitonic barb sort.
+
+## 2026-11-12 [feather][webgpu][tsl][dof][capture] Day 12 (Feather) implemented & calibrated
+- Choices: `2.39:1` scope aspect; whisper hover + stronger press/drag pointer gestures.
+- Root cause of earlier localhost crash: `DrawnViewport.ready()` ran inside `super()` before `ThreeViewport`'s class field `readonly inputRouter = new InputRouter(this)` initialized -> moved `_installGestureBehavior()` to `DrawnViewport.constructor` after `super(args)`.
+- Four WebGPU/TSL shader bugs caught & fixed in first headless pass:
+  1. `WorkgroupInfoNode.element(0)`: unlike `storageElement`, `WorkgroupInfoElementNode` does not wrap raw JS numbers -> `this.indexNode.getNodeType is not a function`; fixed in `sharedArray` (`typeof idx === 'number' ? int(idx) : idx`).
+  2. `maxStorageBuffersPerShaderStage = 8`: `stemsStepCompute` bound 13 separate storage buffers -> packed into `rachisDynamicBuffer`, `barbMetaBuffer`, `stemAuxBuffer`, `capsulesAndTorqueBuffer` (`<= 7` per stage).
+  3. `cameraPosition` inside shared layout `Fn` `evalKeratinFiberBSDF` -> WGSL `unresolved value 'render'`; passed `viewDir` from caller.
+  4. JS unary `-d.x` on a TSL `Node` -> `NaN.0` in WGSL -> `.negate()`.
+- Visual/optical calibration against reference macro photo:
+  1. Exact inverse `NeutralToneMapping` (`inverseNeutralToneMappingColor`) hit measured reference corner stops within `0.002` sRGB (`#4b6993` top-left `[0.294, 0.412, 0.573]`, `#46658f` bot-left `[0.282, 0.400, 0.565]`, `#85a0c2` top-right `[0.522, 0.627, 0.761]`).
+  2. Real-time `MacroDepthOfField` dotted-hair fix: `depthOnly` pass (`colorWrite: false, depthWrite: true`) uses continuous ribbon corridor (`|v| <= 0.76`) instead of coverage-dependent discard, plus half-res 9-tap tent prefilter + 1-px focal-corridor protection + 9-tap tent postfilter.
+  3. Multi-sampled `Capture.ts` (`dofSamples: 32, shutter: 0`): Shirley–Chiu concentric 9-blade iris + `thinLensViewOffset` off-axis frustum shear holds focal plane pixel-exact while integrating true partial-occlusion optical bokeh; `Feather.captureChanged` auto-bypasses `MacroDepthOfField`.
+- Checks: `pnpm typecheck`, `pnpm lint:check`, `pnpm test` (21/21), `pnpm build` clean (`dist/assets/Feather-*.js` 17.7 KB gzip).
+
+## 2026-11-12 [feather][physics][jitter] Feather core jitter fixed, contact params exposed
+- User: core barbs collide at high density -> jittery movement, wrong for the emotion; fix via damping / softer collisions, ideally exposed as simulation params.
+- Measured rest pose (CPU, seed 12): 1532/2048 collision nodes overlap other envelopes, 7575 contacts, median 3 / p90 9 / max 19 neighbors, mean overlap 0.34, max 0.98.
+- Bugs in stemsKernel: pass 1A integrated position but never stored velocity; pass 1B did vel = old vel + collision push/dt (and, by TSL re-read order, likely read curNode after overwrite). Out of contact velocity never decayed -> perpetual bounce between elastic target and contacts. Root nodes 1,2 had an ad-hoc spring velocity.
+- Fix (FeatherPhysics.ts): PBD velocity; start-of-substep vel parked in stemAux frame slot (overwritten by Bishop transport later) for accel; accel low-passed (1 - exp(-40 dt)); contact radius min(sumEnv, mix(sumEnv, restDist, restOverlap)) via second shared array wgRestStations (2 x 8 KB = 16 KB limit exactly); push (R-d)*u*contactStiffness, sum capped at max single push (<= 0.045); only contactBounce of push kept as velocity; velcro exp(-contactDamping*compPeak*dt) and structural exp(-stemDamping*dt) relative to socket rootVel; barbule modes' damping x barbuleDamping.
+- New Feather props: stemDamping 3, barbuleDamping 1 (Physics); envelopeScale moved + contactStiffness 0.12, contactDamping 60, contactBounce 0.15, restOverlap 1 (new Contacts group).
+- Measured (headless dev, 60 fps steps, 120 frames): air 0.85 stems p99 1.67e-3 -> 3.24e-4 cm, max 3.61e-3 -> 7.50e-4; barbules p99 1.89e-3 -> 3.59e-4. Air 0 after 10 s settle: 2nd diff ~3e-7 cm, drift 0.03 mm/2 s (baseline crept ~1 mm/2 s).
+- User: "it's already looking so much better I would say it's perfect." Checks: typecheck, lint:check, test 21/21, build clean. Uncommitted.
+
+## 2026-11-12 [feather][audio][fade][camera] Feather soundtrack, white fades, camera rig
+- User: add the song in feather/ (BreathOfTheStillness.mp3), adjust timeline, fade in/out like Fold but to white and 5 s, add camera rig: camera ~where it is, parented to a node at the world/feather center, rig turns ~2 revolutions per timeline.
+- Track 224.0 s (browser metadata; afinfo said 224.04) -> DURATION 224.04, replaced on loadedmetadata. Extracted Fold's audio code to `src/Soundtrack.ts` (constructor(url, document); volume setter; playbackChanged; sync(time); dispose); Fold converted (no behavior change; verified t=0 black, duration 163.896).
+- TimelineFade moved fold/ -> src/, `color` prop (default black). Neutral: display-space crossfade + exact inverse neutral (`inverseNeutralToneMapping` Fn, cap 0.998, select passthrough when level = 1). Others: linear mix. Verified: t=1.25/2.5/3.75 backdrop sRGB 238/193/126 = computed display mix; end frame 255.
+- Rig: pivot at pose target (crown, 4.6 mm from origin) so the crown stays centered + focused. Decision: studio (backdrop + light dirs + volume key dir) rides the rig -> calibrated corners identical at 26/90/180° (#46658f, #4b6993, #85a0c2). Lens shift in Capture is in local space -> works with parented camera. orbitTurns (2) + volume (0.8) in Main.
+- Air phase: round(duration/32) cycles per loop (was 1 cycle per 32 s timeline) -> same pace, seamless.
+- Checks: typecheck, lint:check, test 21/21, build (mp3 hashed in dist/assets). Uncommitted.
+
+## 2026-11-12 [feather][camera] Feather rig crane (up-and-down)
+- User doubled turns (orbitTurns 4, edited in code) and asked: rig starts slightly above (tips ~mid-frame), goes down to show the stem with its root never visible, comes back up; sine, 2 cycles per timeline. Then: "1 to -3.5 is a good range in y".
+- moveRig (was turnRig): Macro only, rig y = lerp(craneBottom, craneTop, 0.5 + 0.5 cos(2π craneCycles t/T)), rig xz = macro target; Full Feather holds its pose target. Props craneCycles 2, craneTop 1, craneBottom -3.5 + orbitTurns moved to new Rig group.
+- Measured tips: max 1.43-1.65, p95 ~1.1-1.17, p90 0.85-1.05 (seeds 12/7/123/512/999); rachis root (1.95, -5.45, -0.46), top (0.61, -1.27, -0.35). At y=-3.5 root >= 0.8 cm below frame (max depth 7.25 -> half-height 1.15).
+- Verified headless: y 0.874 at t=6, -1.25 at 28, -3.5 at 56; tips mid-frame at top, root never in frame. Offered (not done): pivot following the rachis on the way down (shaft ~0.9 cm off-axis at the bottom).
+
+## 2026-11-12 [feather][webgpu][mrt][traa] Fix non-fullscreen orthographic TRAA MRT attachment mismatch
+- User: playing Feather in non-fullscreen mode spams `Attachment state of [RenderPipeline "renderPipeline_FeatherBarbsDepth_50"] is not compatible with [RenderPassEncoder]`: pass expects 2× `RGBA16Float` (`output` + `velocity` from `traa` on orthographic axis views `Top`/`Bottom`/`Left`/`Right`/`Front`/`Back`), pipeline has 1× `RGBA16Float`. Disappears when orthographic views removed.
+- Root cause in Three r187 (`NodeMaterial.js:525-598` + `WebGPUBackend.js:2479`): `material.fragmentNode !== null` skips `NodeMaterial`'s `renderer.getMRT()` block, emitting an identical 1-output fragment shader (`stageFragment.id`) in both 1-attachment and 2-attachment passes, and `getRenderCacheKey` only inspects `getCurrentColorFormat` (`textures[0]`), not `textures.length` -> cached 1-target `GPURenderPipeline` reused inside 2-target `traa` pass.
+- Fix (`FeatherMaterial.ts`): switched `RachisMesh`, `BarbMesh`, and `BarbuleMesh` (both beauty and `depthOnly`) from `vertexNode` + `fragmentNode` to `positionNode` (with `positionPrevious.assign(worldVertex)` for clean `VelocityNode` motion vectors) + `colorNode` (`fog = false`), plus orthographic view-ray handling (`cameraProjectionMatrix * (0,0,0,1)` `.w > 0.5` -> `cameraWorldMatrix` `+Z`) and collinearity fallback on `cross(toCam, T)` for `Top`/`Bottom` views.
+- Verified headless in non-fullscreen multi-viewport mode (`Front`, `Top`, `Perspective`, `Active` playing + all `displayBuffer` channels): zero console/WebGPU errors.
+
+## 2026-11-12 [host][fullscreen][playback][input] Click fullscreen viewport while paused to play
+- User: when Codevember demos are in fullscreen and paused, clicking on the viewport should play it just like clicking the play button.
+- Fix (`IoCodevember.ts`): added a `Behavior` on `#Fullscreen.inputRouter` (`priority: BehaviorPriority.modal`) whose `click` sets `this.editor.isPlaying = true` when `event.button === 0 && this.fullscreen && !this.loading && !this.capturing && !this.editor.isPlaying`. Runs via `InputRouter._offerClick` inside `pointerup` (mouse click + touch tap, ignores drags > 4 px so paused Feather drag gestures don't trigger play, and unlocks WebAudio autoplay just like the play button). Also switched `views.fullscreen` from `profile: 'select'` to `profile: 'none'` so fullscreen clicks don't CPU-raycast scene geometry (e.g. Fold's 8M triangles).
+- Verified headless + `pnpm typecheck`, `pnpm lint:check`, `pnpm test` (24/24), `pnpm build` clean.
+
+## 2026-11-12 [feather][capture][dof] Capture strategy: forward-only simulation, lens DoF, fiber fill
+- User: capture strategy for Feather. No motion blur (slow motion; scrubbing would fight the physics); the capture should play the simulation through in small steps; realistic DoF with bokeh by offsetting the camera, rendering many times, integrating into HDR.
+- Found: thin-lens capture existed (dofSamples, Halton concentric iris), but: shear off by 0.13% for 4096×1716 vs camera 2.39 (io fits frame inside; vertical in-focus smear ±0.24 px); half-float sum (biased at 64+ samples); physics stepped 1/30 per frame (3 substeps of 1/90 vs 1/180–1/240 live); capture started from whatever state; settle 2 s/frame wasted (~3.7 h).
+- Built (`Capture.ts`): `samples` replaces motionBlurFrames/dofSamples; `preroll`; `fill`; per-day `getCaptureDefaults`; `checkCaptureOptions`; float32 ping-pong sum; Vogel `irisSample` + `goldenStride`; `setThinLensViewOffset` (exact under the view's fit, camera aspect kept); stage 'preroll'; info `{samples, lens, fill}`. Tests moved to `src/Capture.test.ts` (focal plane to 1e-3 px in a 4096×1716 picture, thin-lens displacement, jitter, iris spread, stride).
+- Built (Feather): defaults `{samples: 64, shutter: 0, settle: 0, preroll: 10}`; capture start resets physics + touch; fixed 1/120 steps (2 substeps) with remainder and per-step air phase; real-time DoF bypassed during lens capture; fiber fill in FeatherMaterial (`lensSpread`, `lensFocus`, `fiberMinWidthPx`, min width through `vRibbon.z`).
+- Measured headless 4K, frame 900: 64 samples unfilled = hatching; real-time-DoF residual fill (fill 0.5/1.25 in r/√N) = smooth but soft near focus and dimmer; fiber fill at 2r/N = no effect (too small); fiber fill at 2r/√N = smooth, crisp, same brightness, matches/beats 256 unfilled; 32 OK. Same capture twice = same PNG bytes, across sessions too. Real-time view after shader change: 812 px ±1, 1 px 15 (float rounding). Timing: 17 ms/subframe (rAF 60 Hz bound), 64 samples 1.1 s/frame, 256 4.4 s.
+- Checks: typecheck, lint:check, test 24/24, build. Uncommitted.
+
+## 2026-11-13 [hollow][plan] Day 7 (Hollow) two-phase architectural plan
+- Reference cave photo measured (`468×655`): skylight bright `#96cfdc`, skylight mist `#3998d1`, rear cyan steps `#6c919f`, left firelit travertine `#b07536`, warm stalactites `#845737`, right draperies `#433943`, deep lake `#1b88b0`, skylight reflection `#6bbbd6`, rimstone interior `#a56b32`, rimstone lip `#784c2a`, fg wet rock `#51474c`.
+- Verified Three r187 WebGPU support in `node_modules/three`: `LightProbeGrid` + `lightProbeGridIrradiance` (`examples/jsm/lighting/LightProbeGrid.js`), `ReflectorNode` (`reflector`), `RectAreaLightNode` + `RectAreaLightTexturesLib`, `triplanarTextures`, `PMREMGenerator` + `getParallaxCorrectNormal`. Note: `RayTracedRadiosity` is r188dev + external `three-mesh-bvh` CDN, so avoided; `PostprocessingGodraysExample` runs after `ReflectorNode` and misses water reflections, so skylight shafts must be an in-scene volumetric mesh (`colorNode`, `fragmentNode === null` for TRAA MRT compatibility) + `scene.fogNode`.
+- Key architectural decisions in `Codevember.plan.md` (`## 7. Hollow`):
+  1. **Phase 1 (Blockout):** Seeded 3D karst SDF + CPU Surface Nets shell + `128×64×160` `RGBA16F` GPU SDF/normal volume + Voronoi boulders + rib-guided stalactites/stalagmites/fluted draperies with tangent collar skirts, clay/water preview for aesthetic sign-off.
+  2. **Phase 2 (Lighting, Water, Materials):** Linearity split of two static 3-bounce `LightProbeGrid`s (`skyProbeGrid` + `fireProbeGrid` × live flickering off-screen fire uniform), `RectAreaLight`s, parallax PMREM wet specular probes, `ReflectorNode` + Beer–Lambert refraction + `512²` capillary-gravity dispersive wave PDE bouncing off SDF shorelines from stalactite-tip droplets, GPU `1024²` procedural rock/travertine atlases, world-space derivative triplanar + 3D-SDF normal/AO mesh surface blending, dual-normal wet clearcoat.
+
+
+
+## [plan] Hollow aesthetic brief locked to ref
+- User restated Hollow vision from cave ref (cyan skylight, off-screen warm fire, mirror lake + droplets, clearcoat/triplanar/SDF blend, LightProbeGrid bake, planar reflector, volumetrics, 2-phase).
+- Ref saved: docs/refs/hollow-cave.jpg; plan cites it.
+- Phase 1 code already present; awaiting open Q answers.
+
+## [impl] Hollow composition + behind-camera fire
+- Locked: dolly, shallow meniscus, silent.
+- Fire alcove always z > cinemaPose.startZ (behind look plane); bounds +Z to 16.5.
+- Seed reshuffles spine amps/bias/mirror, skylight, rimstone, galleries, cascade, vault, heroSide, cinema pose, featureDensity.
+- Hollow applies seed fov/height once per seed; rocks/speleothems follow heroSide + dens.
+- Tests: behind-camera fire + landmark spread across seeds.
+
+## [impl] Hollow Phase 2 first cut
+- HollowLighting: dual LightProbeGrid progressive bake, RectAreaLights, fire flicker behind camera, PMREM probes.
+- HollowMaterial: LightMappedMaterial dual GI + triplanar atlases + SDF blend/AO + wet clearcoat.
+- HollowWater: reflector + Beer-Lambert + droplets + CPU capillary ripples (shore mask).
+- HollowVolumetrics: fogNode + additive shaft mesh (in-scene for reflector).
+- Bake progress exposed; CaptureDefaults preroll 6s.

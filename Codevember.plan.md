@@ -86,6 +86,45 @@ todos:
   - id: fold-camera-cinematic
     content: "Day 1 (Fold) next: cinematic camera animation in the canyon (beyond the loop flight)"
     status: pending
+  - id: hollow-plan
+    content: "Day 7 (Hollow): 2-phase architectural plan in Codevember.plan.md (Phase 1 procedural karst/lake/speleothem blockout + SDF mesh blending; Phase 2 dual-rig LightProbeGrid GI + off-screen fire, dispersive droplet reflector lake, volumetric skylight, triplanar clearcoat stone)"
+    status: completed
+  - id: hollow-phase1-karst-shell
+    content: "Day 7 (Hollow) Phase 1A: 3D karst SDF spine (S-bend lake, vaulted ribs, rear skylight shaft, terraced gours, foreground rimstone dam, hidden left fire alcove), CPU Surface Nets shell + 128x64x160 HalfFloat 3D SDF/normal volume"
+    status: pending
+  - id: hollow-phase1-rocks-speleothems
+    content: "Day 7 (Hollow) Phase 1B: Voronoi-cleaved hero boulders, rib-guided ceiling stalactites (with drip emitter sockets), pagoda stalagmites, fluted wall draperies, tangent collar skirts, 2.39:1 Cinema + Cutaway clay/water blockout review"
+    status: pending
+  - id: hollow-phase2-lighting-volumetrics
+    content: "Day 7 (Hollow) Phase 2A: dual static LightProbeGrid GI (3-bounce cyan skylight + unit fire scaled live by flickering off-screen fire rig), RectAreaLights, localized parallax PMREM specular probes, in-scene volumetric skylight shafts & cave mist"
+    status: pending
+  - id: hollow-phase2-lake-droplets
+    content: "Day 7 (Hollow) Phase 2B: meandering lake planar ReflectorNode + shallow Beer-Lambert refraction, falling stalactite droplets + 512x512 dispersive capillary-gravity wave compute reflecting off SDF shorelines"
+    status: pending
+  - id: hollow-phase2-materials-blending-verify
+    content: "Day 7 (Hollow) Phase 2C: GPU-synthesized 1024^2 PBR rock/travertine atlases, world-space derivative triplanar mapping, 3D-SDF normal/AO/calcite mesh surface blending, dual-layer wet clearcoat, unit tests & WebGPU visual verification"
+    status: pending
+  - id: feather-plan
+    content: "Day 12 (Feather): architectural plan in Codevember.plan.md (connected morphology, 2-layer envelope/wave GPU physics, keratin BSDF + 3D dual-scattering volume, real-time + multi-sampled capture DoF)"
+    status: completed
+  - id: feather-morphology-backdrop
+    content: "Day 12 (Feather): connected rachis + ~120 C2 B-spline barbs + ~65k 3D plumulaceous barbules, static Macro/Full camera, and calibrated #46658f->#85a0c2 studio gradient backdrop"
+    status: completed
+  - id: feather-physics-stems
+    content: "Day 12 (Feather): Layer 0/1 GPU compute (rachis + barb Cosserat/XPBD rods, 2-way rachis root torque, exponential Stokes air drag, 3-scale curl-noise air, variable barbule-envelope stem collisions)"
+    status: completed
+  - id: feather-physics-barbules-gestures
+    content: "Day 12 (Feather): Layer 2 GPU compute (2-mode cantilever barbules, traveling air waves, stem envelope compression deflection, shared-memory neighbor steric collisions) + InputRouter gesture air-wake/brush"
+    status: completed
+  - id: feather-keratin-bsdf-volume
+    content: "Day 12 (Feather): Marschner/Chiang dielectric beta-keratin fiber BSDF (R/TT/TRT + medullary pith), 64x48x40 HalfFloat 3D dual-scattering optical-depth volume, sub-pixel ribbon clamping, GPU parallel barb sort"
+    status: completed
+  - id: feather-dof-capture
+    content: "Day 12 (Feather): custom physical MacroDepthOfField real-time Effect + multi-sampled off-axis thin-lens aperture DoF in Capture.ts (CaptureLens protocol, automatic post-DoF bypass)"
+    status: completed
+  - id: feather-verify
+    content: "Day 12 (Feather): unit tests, headless WebGPU visual verification against reference macro photo (real-time + multi-sampled capture), inspector polish, typecheck/lint/build"
+    status: completed
 isProject: false
 ---
 
@@ -257,6 +296,112 @@ Open items:
 
 ## 7. Hollow
 
+### Vision & Speleological Concept
+
+**Hollow** is a photorealistic procedural karst limestone cavern composed for `2.39:1` CinemaScope (`1 unit = 1 m`), translating the reference cave's complementary chiaroscuro and geology into widescreen ([`docs/refs/hollow-cave.jpg`](docs/refs/hollow-cave.jpg)):
+- **Cool Cyan Skylight (`#3998d1`–`#96cfdc`):** Single upper-rear karst sinkhole opening pouring bluish daylight, crepuscular shafts, and misty haze (`#6c919f`) down onto terraced travertine steps (`gours`).
+- **Warm Off-Screen Firelight (`#b07536`–`#ff9438`):** Hidden flame source in an alcove **behind the cinema camera plane** (never in frame)—bathing left stratified ledges, pagoda stalagmites, ceiling stalactite curtains (`#845737`), and foreground scalloped **rimstone dam (`gour`) pool** (`#a56b32` basin, `#784c2a` lip) in breathing amber-gold glow.
+- **Meandering Mirror Lake & Droplets (`#1b88b0` / `#6bbbd6`):** Dead-still subterranean pool winding from lower-left foreground around the rimstone dam and a cleaved right-hand boulder toward rear cascade steps; sporadic water droplets detach from ceiling stalactites and trigger dispersive concentric ripple patterns that bend the mirror reflection and rebound off rocky shores.
+- **Framing (`fov ≈ 40°`):** Foreground wet fractured dark limestone benches (`#51474c`) and right-hand fluted drapery buttress (`#433943`) frame the cavern depth (`repoussoir`).
+
+---
+
+### Two-Phase Execution Strategy
+
+Split into two reviewable milestones so cavern architecture, proportions, water lines, and speleothem composition are locked in fast clay/preview shading before GI baking, volumetrics, water simulation, and multi-layer materials.
+
+---
+
+### Phase 1 — Procedural Karst Generation, Speleothems & Seamless Blockout
+
+**Files:** `src/days/Hollow.ts`, `src/days/hollow/{HollowField,HollowShell,HollowRocks,HollowSpeleothems}.ts`, `HollowField.test.ts`.
+
+1. **3D Karst Signed Distance Field (`HollowField.ts`, deterministic seeded PRNG)**
+   - **Bounds:** `X ∈ [-14, 14] m`, `Y ∈ [-3, 11] m`, `Z ∈ [-28, 8] m`.
+   - **Meandering Cavern Spine:** S-curved centerline $(x_c(z), y_{\text{floor}}(z))$ sweeping an asymmetric vaulted cross-section:
+     - *Main Flooded Grotto (`z ∈ [-10, +6]`):* Lake basin below $y = 0$, vaulted ceiling $y \approx 5.5\text{–}7.2\,\text{m}$ scored by diagonal joint-guided **ceiling dissolution ribs** (matching reference upper-left-to-center stalactite arcs).
+     - *Warm Travertine Gallery & Behind-Camera Fire Alcove:* Stepped rock shelf opposite the hero boulder; fire pocket sits at $z > z_{\text{camera}}$ (behind the cinema plane) so only amber spill reads in frame.
+     - *Rear Cascade & Skylight Shaft (`z ∈ [-25, -10]`):* Floor climbs $y = 0 \to +2.4\,\text{m}$ via 8–12 scalloped horizontal travertine `gour` steps beneath an angled karst chimney opening to the sky at `(x ≈ +2.5, y ≈ +9.5, z ≈ -20)`.
+     - *Foreground Rimstone Dam (`x ≈ -2.8, z ≈ +1.2`):* Kidney-shaped raised calcified rim (`smin` fused to left shore) enclosing a shallow flat mineral basin just above lake level.
+   - **Lithological Sculpting in SDF:** Continuous bed-competence terracing (`terrace(y + dip)`) cuts horizontal limestone strata ledges into walls; phreatic dissolution noise carves ceiling cupolas. All structural unions use polynomial `smin(a, b, k)` (`k = 0.6–1.4 m` vaults, `k = 0.1–0.25 m` terraces) for $C^1$ topological fillets.
+
+2. **Surface Nets Cavern Extraction & Shared GPU 3D SDF Volume (`HollowShell.ts`)**
+   - **CPU Dual/Surface Nets (`~150 × 84 × 180`, ~18 cm cells):** Extracts clean manifold quad/triangle indexed `BufferGeometry` (`~90k–130k` tris, zero Marching Cubes sliver triangles, exact central-difference SDF normals).
+   - **GPU 3D Distance & Gradient Volume (`Data3DTexture` `128 × 64 × 160` `RGBA16F`, ~10 MB):** Stores $\Phi(\mathbf{x}) = (\nabla\phi_{\text{total}}(\mathbf{x}), \phi_{\text{total}}(\mathbf{x}))$ uniting the cave shell + static boulder proxies. Sampled by all TSL shaders for seamless normal/material blending, 3D SDF ambient occlusion, probe-offset biasing, and lake shoreline wave reflection.
+
+3. **Procedural Rocks, Boulders & Speleothems (`HollowRocks.ts`, `HollowSpeleothems.ts`)**
+   - **Cleaved Boulders & Buttresses:** Subdivided polyhedra sculpted by Voronoi planar bevel cuts (`smax`) + bedding notches + flared basal skirts; includes hero angular boulder jutting into right pool (`x ≈ +2.3, z ≈ -4.2`) and foreground wet rock benches.
+   - **Ceiling Stalactites & Curtain Ribs:** Spawned on ceiling convex ribs ($N_y < -0.45$, high rib curvature); tapered fluted calcite icicles with conical ceiling root bosses. `8–16` stalactite tips directly above deep water register as **active droplet emitters** $(x_i, y_{\text{tip},i}, z_i)$.
+   - **Ledge Stalagmites:** Stacked drip-ring pagoda/conical profiles with broad flowstone pedestals (`smin` flared collar) on flat shelves ($N_y > 0.75$, left firelit gallery).
+   - **Fluted Wall Draperies ("Cave Bacon" / Organ-Pipe Curtains):** Swept S-folded ribbon meshes hanging down upper-right and upper-left overhangs with downward-growing vertical flutes and serrated icicle fringes.
+
+4. **Phase 1 Blockout Review Mode**
+   - Clean warm/cool preview rig + matte clay / geological-zone debug shading + flat translucent water plane.
+   - Inspector controls for `seed`, `cavernWidth`, `vaultHeight`, `meander`, `skylightSize`, `terraceSteps`, `rimstoneScale`, `stalactiteDensity`, `draperyScale`, `waterLevel`, plus `cameraMode: 'Cinema' | 'Cutaway Overview'` (hides/clips upper roof in editor overview for layout inspection).
+
+---
+
+### Phase 2 — Static GI Baking, Fire Atmosphere, Rippling Reflector Lake, Volumetrics & Clearcoat Lithology
+
+**Files:** `src/days/hollow/{HollowLighting,HollowWater,HollowVolumetrics,HollowMaterial}.ts`.
+
+1. **Dual-Rig Static GI Baking + Live Off-Screen Fire + Area Lights (`HollowLighting.ts`)**
+   - **Linearity Trick for Static Bake + Live Flickering Fire (`0 ms/frame` runtime GI cost):**
+     - Bake **two** GPU-resident `LightProbeGrid` L2 SH volumes (`three/addons/lighting/LightProbeGrid.js`, e.g. `16 × 10 × 22` probes, 3 bounces in `onBeforeDraw` on seed/layout change):
+       1. `skyProbeGrid`: multi-bounce cyan indirect light from the skylight shaft + sky portal.
+       2. `fireProbeGrid`: multi-bounce amber indirect light from the occluded left fire alcove at unit intensity.
+     - Sample both in `LightMappedMaterial` via `lightProbeGridIrradiance(grid, safePos, normal)` (`safePos` pushed out of rock using $\Phi(\mathbf{x})$ gradient so wall-embedded probes never leak dark), combining live at 60 fps:
+       $$\mathbf{E}_{\text{GI}}(\mathbf{x},\mathbf{N},t) = \mathbf{E}_{\text{sky}}(\mathbf{x},\mathbf{N}) + I_{\text{fire}}(t)\,\mathbf{T}_{\text{fire}}(t)\,\mathbf{E}_{\text{fire}}(\mathbf{x},\mathbf{N})$$
+   - **Direct & Area Lights (`RectAreaLightNode` LTC + Shadow Lights):**
+     - *Skylight:* Shadow-casting `DirectionalLight`/`SpotLight` (`2048²` PCF) through the top opening + tilted cyan `RectAreaLight` across the sinkhole aperture for broad wet-rock specular sheen + 8-step 3D-SDF soft penumbra cone toward the wide opening.
+     - *Off-Screen Fire:* Occluded left alcove rig combining a warm `RectAreaLight` (broad orange-white wet specular wrap) + shadow-casting `PointLight` (`1024²`) whose position dances (`±10 cm` band-limited curl noise) and whose intensity/Planckian tint (`1850 K–2350 K`) flickers time-periodically over `timeline.duration`.
+   - **Localized Wet Specular Probes:** `2` static `CubeCamera` → `PMREMGenerator` cubemaps (Main Lake Grotto + Rear Skylight Chamber) baked post-GI with box/ellipsoid parallax correction (`getParallaxCorrectNormal`), blended in `envNode` (fire lobe scaled by $I_{\text{fire}}(t)$) for crisp skylight/fire glints on wet clearcoat rock.
+
+2. **Meandering Mirror Lake & Dispersive Droplet Ripples (`HollowWater.ts`)**
+   - **Planar Mirror (`reflector({ resolutionScale: 0.75, bounces: false, generateMipmaps: true })`):** Dead-still reflection at $y = 0$ weighted by exact dielectric water Fresnel ($F_0 = 0.02$, $\eta = 1.333$).
+   - **Shallow Mineral Water Absorption & Refraction:** Reads `viewportDepthTexture` / `viewportSharedTexture` (`BackdropWaterExample` pattern) with Beer–Lambert absorption ($\boldsymbol{\sigma}_a$ tuned so $< 0.35\,\text{m}$ shores glow warm ochre `#a56b32` and deeper pool shifts to `#1b88b0` cerulean).
+   - **Falling Stalactite Droplets & `512 × 512` Dispersive Wave Compute:**
+     - Seeded periodic schedule spawns glinting elongated droplets from the ceiling stalactite emitter tips; droplets accelerate under $g = 9.81\,\text{m/s}^2$ and inject impulses on lake impact (`preroll: 6 s` in `CaptureDefaults`).
+     - `512 × 512` `RG16F`/`R32F` GPU ping-pong wave PDE augmented with **capillary surface-tension dispersion** ($-\beta\nabla^4\eta$, producing multi-ring concentric capillary-gravity wave trains instead of single dull humps) and **Neumann boundary reflection** against the SDF shoreline mask ($\phi_{\text{total}}(x, 0, z) \le 0$), so ripples physically bounce off the rimstone dam and right boulder and bend `reflector.uvNode`.
+
+3. **In-Scene Volumetric Skylight Shafts & Cave Mist (`HollowVolumetrics.ts`)**
+   - **Why In-Scene (not post-only `GodraysNode`):** Post-processing effects run after `ReflectorNode`, which would leave the lake reflection missing the cyan mist and shafts.
+   - **Dual-Stage Atmosphere:**
+     1. `scene.fogNode`: distance + height cave haze tinting rear chamber (`z < -10`) toward `#3998d1` while keeping foreground grotto clear.
+     2. **Volumetric Skylight Shaft Mesh:** Bounding volume in rear chamber (`colorNode` + premultiplied alpha, `fragmentNode === null` so editor `traa` MRT views stay valid) raymarching `20` jittered steps through Skylight `2048²` shadow map + 3D humidity FBM with Henyey–Greenstein forward scattering ($g = 0.65$)—visible directly AND reflected in the mirror lake (`#6bbbd6`).
+
+4. **Seamless Mesh Surface Blending & Hyper-Realistic Wet Clearcoat Stone (`HollowMaterial.ts`)**
+   - **GPU-Baked `1024²` Seamless PBR Detail Atlases (once in `onRendererInitialized`, `< 15 ms`, mipmapped + anisotropic):**
+     1. *Fractured Cleaved Limestone* (Voronoi facets, micro-cracks, spar veins, pits),
+     2. *Fluted Travertine & Micro-Terraced `Gour` Sinter* (scalloped calcified micro-ridges + crystal sparkle),
+     3. *Karst Dissolution & Seepage* (phreatic scallops, mineral curtains).
+   - **3-Tier Seamless Rock-to-Rock & Rock-to-Cave Blending:**
+     1. *Vertex Collar Flare:* Placed rock/dripstone skirts project onto $\phi_{\text{cave}} = 0$ at grazing tangent angles.
+     2. *TSL 3D-SDF Normal & AO Fillet:* Within fracture-noise-modulated contact band $|\phi_{\text{cave}}| < w_{\text{blend}}$, mesh macro normal relaxes to $\nabla\phi_{\text{total}}(\mathbf{x})$, eliminating $C^0$ shading creases; 6-tap 3D-SDF cone AO adds natural calcite/crevice contact darkening.
+     3. *Continuous World-Space Derivative Triplanar:* Tightened triplanar weights ($\|\mathbf{N}\|^5$) in `positionWorld` space using tangent-free surface-gradient / UDN normal blending—identical detail across mesh boundaries with zero UV seams.
+   - **Hydrological Wetness & Dual-Normal Clearcoat (`MeshPhysicalNodeMaterial`):**
+     - Wetness field $W(\mathbf{x})$ (lake capillary fringe $y < 0.65\,\text{m}$, rimstone lip, active drip streaks, stalactite tips) darkens porous base albedo ($\text{albedo}^{1.45} \times 0.52$), lowers base roughness, and drives `clearcoatNode` ($0 \to 1$, `clearcoatRoughness: 0.04–0.12`) over a **smoothed `clearcoatNormalNode`** so liquid water films bridge micro-grain pits while preserving sharp rock detail underneath.
+     - Thin calcite speleothems & draperies add backlit **subsurface wrap transmission** so thin curtains glow warm amber / cool cyan at their edges.
+
+---
+
+### Todo Breakdown
+
+- [x] **1. Plan & Design (`hollow-plan`):** Two-phase architectural plan in `Codevember.plan.md`.
+- [ ] **2. Phase 1A — Karst SDF & Surface Nets Cavern (`hollow-phase1-karst-shell`):** Seeded S-bend cavern + skylight + terraced `gours` + rimstone dam + hidden fire alcove SDF, Surface Nets shell mesh, `128×64×160` GPU 3D SDF/normal volume, and unit tests.
+- [ ] **3. Phase 1B — Rocks, Dripstones & Blockout Review (`hollow-phase1-rocks-speleothems`):** Voronoi-cleaved boulders, rib-guided stalactites (with drip emitters), pagoda stalagmites, fluted draperies, collar skirts, `Cinema` / `Cutaway` blockout materials, enable `Hollow` in `IoCodevember.ts` for layout review.
+- [ ] **4. Phase 2A — Baked GI, Fire Rig, Area Lights & Volumetrics (`hollow-phase2-lighting-volumetrics`):** Dual `LightProbeGrid` bake (`sky` + live-scaled `fire`), `RectAreaLight`s, parallax PMREM specular probes, `scene.fogNode` + in-scene volumetric skylight shafts.
+- [ ] **5. Phase 2B — Mirror Lake & Dispersive Droplet Ripples (`hollow-phase2-lake-droplets`):** `ReflectorNode` + shallow Beer–Lambert refraction, falling droplets from stalactite tips, `512²` capillary-gravity wave compute with SDF shoreline reflections.
+- [ ] **6. Phase 2C — Clearcoat Lithology, Mesh Blending & Polish (`hollow-phase2-materials-blending-verify`):** GPU `1024²` procedural rock/travertine atlases, world-space derivative triplanar, SDF normal/AO mesh blending, wet clearcoat + calcite translucency, `CaptureDefaults`, headless WebGPU verification.
+
+### Locked Decisions
+
+1. **Camera motion:** Keep subtle looping dolly / lateral track (`trackForward` / `trackLateral` / `trackLookDrift`).
+2. **Rimstone (`gour`) pool water:** Own elevated shallow amber meniscus (`RIMSTONE_POOL_STEP ≈ +8.5 cm` above main lake).
+3. **Audio:** Silent for now (no `Soundtrack` until later).
+4. **Warm light placement:** Fire alcove always behind the cinema camera plane so only spill/atmosphere reads in frame.
+5. **Seed hunting:** Seed must reshuffle major composition landmarks (spine, skylight, lake/rimstone, galleries, fire, camera base pose, hero rock side) so many seeds yield distinct widescreen frames.
+
 ## 8. Tesseract
 
 ## 9. Membrane
@@ -266,6 +411,72 @@ Open items:
 ## 11. Rust
 
 ## 12. Feather
+
+### Vision & Macro-Optical Concept
+
+**Feather** is an ultra-photorealistic macro photography study and two-layer aerodynamic GPU simulation of a single connected snowy-white plumulaceous feather (`1 scene unit = 1 cm`). Framed initially through a static 85–100 mm macro lens against a soft cerulean-slate studio backdrop matching the reference photograph (`#46658f` lower-left, `#4b6993` upper-left, `#4c6c93` top-center, sweeping into a luminous `#85a0c2` upper-right backlight softbox glow), dozens of slender arched barbs (`rami`) and tens of thousands of microscopic hair-like barbules (`radii`) float in neutral buoyancy, responding with weightless Stokes-drag sensitivity to millimeter-scale air currents and gentle pointer gestures while moving unmistakably as one unified feather anchored to a single elastic central shaft (`rachis`).
+
+### Architecture & Technical Breakdown
+
+1. **Connected 3-Level Feather Morphology (`src/days/feather/FeatherMorphology.ts`)**
+   - **Level 0 — Rachis (Central Shaft, `32` Cosserat/Bishop-frame nodes):** Gently curved tapered keratin shaft rising from the lower-right/center below the frame into the soft-focus lower plume core. Every barb's root position and Bishop basis $(\mathbf{T}_0, \mathbf{N}_0, \mathbf{B}_0)$ are rigidly transformed by its attachment socket on the deformed $C^2$ rachis spline (plus a downy basal afterfeather tuft filling the luminous lower bokeh cloud). Zero detached strands.
+   - **Level 1 — Barbs / Stems (`112–128` rami, `20` physics nodes $\to$ `64` $C^2$ cubic B-spline render segments):** Bilateral/helical 3D crown fanning upward-left across ~`2.5 cm` of depth (foreground blurred barbs, razor-sharp focal-plane barbs, background creamy plume). Continuous shaft taper $r_{\text{core}}(s) = r_0(1 - s)^{0.75}$ (`35 µm → 4 µm`). Evaluating smooth cubic B-splines in `vertexNode` prevents polygonal kinks at macro zoom.
+   - **Level 2 — Microscopic Barbules (`~65,536` desktop / `~24,576` mobile, `4` arc-length-preserving curved segments = `8` tris each):** Single instanced draw (`~524k` tris). Branch bilaterally along $s \in [0.03, 0.99]$ at acute forward angles ($\theta_b \in [22^\circ, 42^\circ]$) with 3D plumulaceous dihedral V-splay ($\beta \in \pm[12^\circ, 32^\circ]$), subtle rest droop, seeded length/angle jitter, tip micro-affinity clumping, and pointed lance-tip taper.
+   - **Shared Barbule Envelope Profile $R_{\text{env}}(i, s)$:** Exact lateral reach $R_{\text{env}}(i, s) = \ell_b(i, s)\sin\bar{\theta}_b(s)\cos\bar{\beta}(s)$ (`0` at $s = 0$, swelling via $\text{smoothstep}(0, 0.15, s)(1 - s)^{0.65}$ to `~1.5–4.5 mm`, tapering to `0` at $s = 1$), shared directly with Layer 1 collision physics.
+
+2. **Two-Layer Hierarchical GPU Compute Physics (`src/days/feather/FeatherPhysics.ts`)**
+   - **Weightless Low-Reynolds Aerodynamics ($\text{Re} \ll 1$):** Microgram keratin mass vs porous barbule Stokes paddle. Gravity is ~95% balanced by intrinsic keratin rest curvature so the plume floats effortlessly rather than swinging like heavy pendulums. Relative velocity $(\mathbf{v} - \mathbf{u}_{\text{air}})$ splits into shaft-normal ($\gamma_\perp(s) \propto R_{\text{env}}(s) \in [8, 35]\,\text{s}^{-1}$) and tangential ($\gamma_\parallel \approx 0.15\,\gamma_\perp$) components integrated via **exact unconditional exponential decay** $\mathbf{v}_\perp^{+} = \mathbf{u}_{\text{air},\perp} + (\mathbf{v}_\perp - \mathbf{u}_{\text{air},\perp})e^{-\gamma_\perp\Delta t}$ (`2–3` substeps/frame, `dt = 1/180 s`).
+   - **3-Scale Divergence-Free 4D Curl-Noise Air Field ($\nabla \times \boldsymbol{\Psi}(\mathbf{x}, t)$):** Time-periodic over `timeline.duration` for seamless looping: (1) slow room breath (`~12 cm` scale), (2) gently rising thermal eddies (`~2.5 cm`, `+3 mm/s`), (3) fine micro-shear (`~0.6 cm`) driving barbule ripples.
+   - **Layer 0 + 1 (`stepStemsCompute`) — Rachis & Stems with Two-Way Coupling & Variable Envelope Collisions:**
+     - **Two-Way Rachis–Barb Coupling:** Net aerodynamic and gesture forces across all barbs integrate back as bending + axial torsion moments onto the shared rachis rod. Any breeze or gesture on one side subtly rocks/twists the rachis (`~0.3°–1.8°`), moving all barb roots in locked common-fate phase before length-dependent whip waves propagate base-to-tip.
+     - **XPBD Inextensible Rod + Graded Compliance:** Exact segment length preservation; bending compliance increases smoothly from stiff base to supple tip.
+     - **Variable Envelope Stem–Stem Collisions:** Tiled across the ~`2,400` stem nodes in workgroup shared memory (`< 0.15 ms`). For stem separation $d < R_{\text{env},A} + R_{\text{env},B}$ (excluding shared-rachis root zone $s < 0.08$), penetration $u = 1 - d/(R_A + R_B)$ applies **nonlinear spongy steric XPBD compliance** $\tilde{\alpha}_{\text{env}}(u) = \alpha_0 / \max(u, 0.05)$ plus radial/tangential viscous-velcro damping (cushioned downy contact without rubbery bounce), backed by a stiff inner shaft-core constraint ($d < r_{\text{core},A} + r_{\text{core},B}$). Writes temporally smoothed **envelope contact compression $\mathbf{c}_{i,j}$** (`vec4`) per stem node.
+     - **Calm contacts (fix for core jitter):** the core is crowded by design: in the rest pose 75% of collision nodes overlap other envelopes (median 3 neighbors, up to 19, up to 98% deep). Pushing that apart every substep while the elastic pull restored it, with each push kept as velocity, made the core jitter. Now:
+       - **Rest-relative contact radius** $R = \min(R_A + R_B,\ \text{mix}(R_A + R_B,\ d_{\text{rest}},\ \texttt{restOverlap}))$, with $d_{\text{rest}}$ measured between rest-pose stations (a second shared-memory array; the two fill the `16 KB` workgroup limit exactly). At `restOverlap = 1` the rest pose is contact-free and envelopes resist only being pressed closer.
+       - **Spongy push** $(R - d)\,u\,\texttt{contactStiffness}$: zero at first touch. The neighbors' pushes are summed, then capped at the largest single push.
+       - **Position-based velocity:** $\mathbf{v} = (\mathbf{p}_{\text{end}} - \mathbf{p}_{\text{start}})/\Delta t$, except that only `contactBounce` of a collision push becomes velocity. Velcro damping $e^{-\texttt{contactDamping}\,u\,\Delta t}$ and structural damping $e^{-\texttt{stemDamping}\,\Delta t}$ act on velocity relative to the barb's rachis socket, so the feather's common motion is untouched. The acceleration the barbules whip from is low-passed (`~25 ms`).
+       - Measured at `air 0.85`, stepping 60 fps: p99 stem jitter 5.1× lower, barbule jitter 5.3× lower. With no air the settled feather is still (second difference `3e-7 cm`) instead of creeping `~1 mm / 2 s`.
+   - **Layer 2 (`stepBarbulesCompute`) — Wavelike Microscopic Hair Dynamics & Shared-Memory Collisions:**
+     - `128` contiguous barbules along one barb vane per workgroup (`~512` workgroups, `< 0.2 ms`). Each barbule integrates **2 coupled Euler–Bernoulli cantilever modes** $(\mathbf{q}_1, \mathbf{q}_2 \in \mathbb{R}^2)$ in its moving stem Bishop frame, reconstructed in `vertexNode` via unit-tangent quadrature so barbule length $\ell_k$ never stretches.
+     - Driven by: (1) d'Alembert inertial whip from parent stem acceleration, (2) fine curl-noise air velocity + spatial phase lag creating emergent **metachronal/cilia-like traveling waves** gliding up the vane, (3) direct pointer air-wake & ray brush deflection, (4) **Layer 1 envelope contact deflection $\mathbf{c}_i(s_k)$** (visibly flattening/parting barbules on the compressed side when two barb envelopes press together), and (5) **workgroup shared-memory neighbor steric ordering** (`q1[lid ± 1]`) preventing adjacent barbules from slicing through neighbors and propagating subtle hair-to-hair domino waves at zero global-VRAM cost.
+   - **Interactive Viewport Gestures (`GestureListener` via `DrawnViewport.inputRouter`):**
+     - Router `Behavior` (`priority: BehaviorPriority.navigation - 10`, below free-view orbit navigation, active in `#Fullscreen` / `#Active` and hover in 3D views) projects pointer position + velocity into a 3D focal-plane air-wake jet and soft steric brush capsule, requesting redraws while impulse decays even when timeline playback is paused.
+
+3. **State-of-the-Art Photorealistic Fiber Rendering (`FeatherMaterial.ts` + `FeatherVolume.ts`)**
+   - **Marschner / Chiang Dielectric $\beta$-Keratin Fiber BSDF (`Fn` layout):**
+     - Refractive index $\eta = 1.55$, near-zero melanin absorption $\sigma_a = [0.004, 0.003, 0.002]\,\text{mm}^{-1}$. Reconstructs curved 3D cylindrical cross-section normals across ribbon $v \in [-1, 1]$ (analytically pre-integrating azimuth as pixel width approaches sub-pixel scale).
+     - Evaluates longitudinal/azimuthal **$R$** (primary cuticle specular glint, scale tilt $\alpha_R = -2.5^\circ$), **$TT$** (strong forward backlit transmission lobe from the upper-right studio softbox—why backlit white barbules glow against the slate backdrop), and **$TRT$** lobes, plus **medullary pith scattering** (`medulla` high in aerated rachis/barb cores, near-zero in solid keratin barbules) and subtle *nodalia* micro-glints along barbules.
+   - **3D Plumage Density & Dual-Scattering Volume (`Storage3DTexture`, `96 × 64 × 64` `HalfFloatType`, `generateMipmaps = false`):**
+     - Per-frame compute deposits stem + analytical barbule-envelope extinction into the tight feather bounds and sweeps optical depth $\tau_{\text{key}}$ along the upper-right key light plus local ambient visibility $V_{\text{amb}}$.
+     - Single hardware trilinear `texture3D` sample per vertex/fragment evaluates Beer–Lambert + dual-scattering forward glow $T_{\text{dual}}(\tau)$, yielding the exact pillowy `#bfcde3`–`#f4f7fc` multi-scattered snowy core and `#839cbc` cool cerulean-slate inner shadows with zero shadow-map acne or hair aliasing.
+   - **Energy-Conserving Sub-Pixel Ribbon AA & GPU Bitonic Back-to-Front Sort:**
+     - Clamps screen-space ribbon width to $w_{\min} = 1.35\,\text{px}$ and scales premultiplied coverage by $(w_{\text{proj}} / w_{\text{clamped}})$ with a cylindrical-to-tent kernel transition so `4 µm` (`< 0.2 px`) barbule tips never alias, dash, or shimmer.
+     - 1-workgroup GPU **bitonic sort** (`128` barb centroids along view $-Z$, zero CPU readback) orders `BarbMesh` and `BarbuleMesh` back-to-front every draw (`OneFactor, OneMinusSrcAlphaFactor`).
+
+4. **Studio Backdrop, Static Camera & Dual-Mode Depth of Field (`MacroDepthOfField.ts` + `Capture.ts`)**
+   - **Calibrated Reference Backdrop:** Distant curved studio cyclorama using inverse-tonemapped linear radiance (`AgXToneMapping` + blue-noise dither) to hit the exact measured reference sRGB gradient (`#46658f` lower-left, `#4b6993` upper-left, `#4c6c93` top-center, elliptical `#85a0c2` upper-right key-light glow), staying parallax-consistent under aperture shifts.
+   - **Camera (`cameraMode: 'Macro' | 'Full Feather'`, default `'Macro'`):** Macro framing (`fov ≈ 20°`, `focusDistance`, `aperture`); `'Full Feather'` reveals the entire connected plume from quill to tip.
+   - **Camera rig (`CameraRig`):** the camera hangs from a pivot at the pose's target, the point it looks at (Macro: `(0.42, -0.18, 0)`, the crown, 4.6 mm from the world origin), so the framed feather stays centered and in focus. The rig turns about the vertical `orbitTurns` times per loop (default 4, one turn per ~56 s). It carries the studio: the backdrop sphere (child of the rig; its gradient is computed in its own space) and the key and fill light directions (the uniforms, plus the volume's key direction, turned each frame). So the calibrated reference look holds from every side, and the feather turns in the studio light as on a turntable, while the air and gravity stay in the world. In `Macro` the rig also cranes up and down on a cosine, `craneCycles` times per loop (default 2): from `craneTop = 1` (eye level with the crown's tips, which then reach mid-frame; a loop starts and ends here, under the white fades) down to `craneBottom = -3.5` (the shaft and lower barbs). At −3.5 the quill's end at y = −5.45 stays ≥ 0.8 cm below the frame at every orbit angle: the worst depth is 5.65 + 1.6 cm, which shows ±1.15 cm. Defaults are the user's (they doubled `orbitTurns` to 4). With 4 turns and 2 swings, the bottom always comes with the front view (0°). At the bottom the shaft sits ~0.9 cm off the turn axis (x ≈ 1.28 vs 0.42), so it swings across the frame and through focus as the rig turns.
+   - **Soundtrack & timeline:** `BreathOfTheStillness.mp3` (224 s) plays with the timeline, which takes its length (`src/Soundtrack.ts`, shared with Fold). `TimelineFade` (`src/TimelineFade.ts`, shared) fades in from white and out to white over 5 s. Under neutral tone mapping it crossfades in display space: tone-map, mix toward the color, then exact inverse PBR Neutral, capped at 0.998 since 1 maps from infinity. That brightens evenly; a linear-light mix toward white would blow out within the first second. Fold keeps its linear-light fade to black. The air's phase runs a whole number of ~32 s cycles per loop (7 for the track), so the air keeps its tuned pace and the loop stays seamless.
+   - **Real-Time Physical `MacroDepthOfField` `Effect`:** Custom TSL `post` effect (avoiding stock `DepthOfFieldNode`'s unweighted far-bleed and `max()` blocky dilation). Computes exact thin-lens pixel CoC $\text{CoC}_{\text{px}}(z) = \frac{r_a H_{\text{px}}}{2\tan(\text{fov}_y/2)}\frac{z - d_f}{z\cdot d_f}$ from the same `(focusDistance, aperture)` properties used in capture; pairs a focal-biased filament depth-anchor pre-pass with CoC-weighted Vogel-disc far gather and smooth dilated near-field veil, followed by subtle high-threshold optical `Bloom`.
+   - **Capture (`Capture.ts`, `capture()` from the console; 2026-11-12):** the simulation can't be scrubbed, so the capture plays the timeline forward only, and the subframes go to the lens, not the shutter.
+     - **Defaults** (`getCaptureDefaults`; the options given override them): `samples: 64, shutter: 0, settle: 0, preroll: 10`. No motion blur (the motion is slow), nothing to settle (no GI).
+     - **Simulation:** a capture restarts the physics from rest (morphology rebuilt, warm-up) and clears touch. `preroll` plays the loop's last 10 s first, each frame drawn once and not saved, so frame 0 follows the last frame in motion. While capturing, the physics steps in fixed `1/120 s` steps (2 substeps, as at 120 Hz), each in the air of its own time, carrying the remainder. A frame's lens samples, drawn at one time, see one simulation. The same capture gives byte-identical PNGs, across sessions too.
+     - **Lens:** each subframe moves the camera to its point of a 9-blade iris (roundness 0.65) on a Vogel spiral (`irisSample`: equal areas, nearest neighbors 0.6–1.4× a hexagonal packing's spacing), in golden-stride order so that time and lens radius never go together under an open shutter. `setThinLensViewOffset` holds the plane in focus to 1e-3 px in a picture of another aspect than the camera's (io's view fits the frame inside; three's `setViewOffset` would set the camera's aspect to the picture's). Halton (2, 3) jitter anti-aliases. The real-time DoF stands aside (bypassed: switching it off rebuilds the view's graph), its depth anchors hidden.
+     - **Fill:** barbules are about as long as their defocus, so their 64 copies scatter in 2D and showed as fine hatching more than ~1 cm from focus. Each sample stands for an equal part of the aperture, of diameter $2r/\sqrt{N}$. The fiber shader draws each fiber at least as wide as that part of the lens blurs it, $w = \texttt{lensSpread}\,|z - d_f|/d_f$ at the fiber's own pixel scale, energy-conserving like the `1.35 px` clamp, and zero at focus. 64 samples with it match or beat 256 without, at the same brightness and as crisp in focus; 32 hold up. Tried first: the real-time DoF as a residual blur of $r/\sqrt{N}$ per sample. It softened barbs near focus (its half-res gather blurs ≥ ~3 px once the CoC passes 0.55 px) and dimmed the bright haze. Widening by the copies' 1D spacing $2r/N$ (right for long fibers) was 8× too little.
+     - **HDR:** the subframes add up in 32-bit float (ping-pong targets read texel by texel; in half floats 1/N steps round away unevenly). Saved as half-float EXR (linear, before tone mapping) and/or PNG.
+     - **Cost:** one subframe per animation frame (three advances the node frame, which its scene pass renders once per, only in its own rAF loop). Headless at 60 Hz: 17 ms a subframe, a 64-sample 4K frame 1.1 s, the 224 s loop (6,722 frames) ~2 h; 256 samples 4.4 s a frame. A 120 Hz display may halve that if the GPU keeps up.
+     - The lens is softer than the real-time view, whose DoF keeps thin hairs crisp (closest-depth and min-CoC protection); a real lens doesn't.
+
+### Todo Breakdown
+
+- [x] **1. Plan & Design (`feather-plan`):** Document connected morphology, 2-layer envelope/wave GPU physics, keratin fiber BSDF + 3D dual-scattering volume, and real-time + multi-sampled capture DoF in `Codevember.plan.md`.
+- [x] **2. Connected Morphology, Camera & Studio Backdrop (`feather-morphology-backdrop`):** Build rachis + `C^2` B-spline barbs + `~32k` instanced 3D plumulaceous barbules with shared $R_{\text{env}}(s)$, static `Macro` / `Full Feather` cameras, and calibrated `#46658f → #85a0c2` backdrop.
+- [x] **3. Layer 0/1 Stem & Envelope GPU Physics (`feather-physics-stems`):** Implement `stemsStepCompute` (rachis + barb XPBD/Cosserat rods, 2-way rachis root torque, unconditional exponential Stokes drag, 3-scale curl-noise air, variable-envelope soft steric collisions + contact compression buffer).
+- [x] **4. Layer 2 Barbule Wave Physics & Viewport Gestures (`feather-physics-barbules-gestures`):** Implement `barbulesStepCompute` (2-mode cantilever dynamics, traveling air-shear waves, stem envelope compression deflection, workgroup shared-memory neighbor steric collisions) + `InputRouter` gesture wake/brush.
+- [x] **5. Keratin Fiber BSDF, 3D Dual-Scattering Volume & Sorting (`feather-keratin-bsdf-volume`):** Implement Marschner/Chiang $R/TT/TRT$ + medullary pith shader, `64×48×40` `HalfFloat` 3D optical-depth volume, energy-conserving `1.35 px` sub-pixel ribbon clamping, and 1-workgroup GPU parallel back-to-front barb sort.
+- [x] **6. Real-Time `MacroDepthOfField` & Multi-Sampled Capture DoF (`feather-dof-capture`):** Build custom CoC-weighted `MacroDepthOfField` `Effect` and extend `Capture.ts` with off-axis thin-lens aperture sampling + automatic post-DoF bypass.
+- [x] **7. Verification & Polish (`feather-verify`):** Add unit tests (lens shear math, envelope profile, inverse NeutralToneMapping), verify visuals in headless WebGPU Chromium (real-time + multi-sampled capture) against the reference image, and pass `typecheck`, `lint:check`, `test`, and `build`.
 
 ## 13. Labyrinth
 

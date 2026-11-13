@@ -20,7 +20,8 @@ import { StarField } from './fold/StarField.js'
 import { Meteors } from './fold/Meteors.js'
 import { NightVision } from './fold/NightVision.js'
 import { ColorGrade } from './fold/ColorGrade.js'
-import { TimelineFade } from './fold/TimelineFade.js'
+import { TimelineFade } from '../TimelineFade.js'
+import { Soundtrack } from '../Soundtrack.js'
 import { CanyonPath } from './fold/CanyonPath.js'
 import { FoldTerrain, TERRAIN_SIZE, createGeologyUniforms } from './fold/FoldTerrain.js'
 import type { PlaybackListener } from '../IoCodevember.js'
@@ -33,11 +34,6 @@ const SOUNDTRACK = new URL('./fold/CanyonHum.mp3', import.meta.url).href
  * tectonic history, and one flight around the canyon.
  */
 const DURATION = 163.92
-/**
- * How far the soundtrack may part from the timeline (seconds) before it is moved to the playhead: a scrub, or the loop's
- * wrap. Short of that it plays on its own clock (a little drift is fine; easing its rate as it plays crackles).
- */
-const SOUNDTRACK_SLACK = 1
 /** The diurnal cycle opens in the late afternoon. */
 const DAY_START = 16
 /** Days that pass while the belt folds, in `Combined`. */
@@ -346,8 +342,8 @@ export class Fold extends Document implements PlaybackListener, CaptureListener 
   private cloudsAt = 0
   /** The timeline time `onAnimate` last ran for: a jump back to the start while playing is the loop's wrap. */
   private animatedAt = 0
-  /** The soundtrack; whether the editor plays the document; whether the browser holds its sound until a gesture. */
-  private soundtrack: HTMLAudioElement = Object.assign(new Audio(SOUNDTRACK), {preload: 'auto', loop: false})
+  /** The soundtrack, which makes the timeline as long as itself; whether the editor plays the document. */
+  private soundtrack = new Soundtrack(SOUNDTRACK, this)
   private playing = false
   /**
    * What a frame capture does (`CaptureListener`): while it captures the landscape is computed in full at once (no
@@ -355,7 +351,6 @@ export class Fold extends Document implements PlaybackListener, CaptureListener 
    * running average is not shortened by the light and land moving the fraction of a frame between them).
    */
   private captureStage: CaptureStage = 'off'
-  private soundtrackHeld = false
   /** Counts `onAnimate` calls. */
   private animationTick = 0
   private terrainDraft = false
@@ -377,11 +372,7 @@ export class Fold extends Document implements PlaybackListener, CaptureListener 
       ...args,
     })
 
-    // the timeline is as long as the soundtrack
-    this.soundtrack.volume = MathUtils.clamp(this.volume, 0, 1)
-    this.soundtrack.addEventListener('loadedmetadata', () => {
-      if (Number.isFinite(this.soundtrack.duration)) this.timeline.duration = this.soundtrack.duration
-    })
+    this.soundtrack.volume = this.volume
 
     this.camera = new PerspectiveCamera(58, 2.39 / 1, 0.2, 20000)
     this.camera.name = 'Camera'
@@ -455,7 +446,7 @@ export class Fold extends Document implements PlaybackListener, CaptureListener 
       this.animating = false
     }
     this.meteors.loop.value = this.timeline.duration
-    this.syncSoundtrack(time)
+    this.soundtrack.sync(time)
     this.advanceClouds(time)
     this.applyWeather()
     this.updateCamera()
@@ -469,47 +460,11 @@ export class Fold extends Document implements PlaybackListener, CaptureListener 
   /** The editor started or stopped playing the document (`PlaybackListener`): the soundtrack plays along. */
   playbackChanged(playing: boolean) {
     this.playing = playing
-    if (playing) this.playSoundtrack()
-    else this.soundtrack.pause()
-  }
-
-  /**
-   * Starts the soundtrack where the timeline is. Browsers hold sound back until the page has been touched: then it
-   * starts with the first pointer press or key, if the document still plays.
-   */
-  private playSoundtrack() {
-    const audio = this.soundtrack
-    if (audio.readyState >= HTMLMediaElement.HAVE_METADATA) audio.currentTime = this.timeline.currentTime
-    audio.play().then(() => {
-      this.soundtrackHeld = false
-    }, (error: DOMException) => {
-      if (error.name !== 'NotAllowedError' || this.soundtrackHeld) return
-      this.soundtrackHeld = true
-      const resume = () => {
-        window.removeEventListener('pointerdown', resume, true)
-        window.removeEventListener('keydown', resume, true)
-        this.soundtrackHeld = false
-        if (this.playing) this.playSoundtrack()
-      }
-      window.addEventListener('pointerdown', resume, true)
-      window.addEventListener('keydown', resume, true)
-    })
-  }
-
-  /**
-   * Keeps the soundtrack loosely with the timeline at `time` while it plays: it starts at the playhead (`playSoundtrack`)
-   * and is moved there again only when the two part by more than `SOUNDTRACK_SLACK` (a scrub, the loop's wrap); having
-   * ended a moment early, it waits for the wrap.
-   */
-  private syncSoundtrack(time: number) {
-    const audio = this.soundtrack
-    if (!audio || !this.playing || this.soundtrackHeld || audio.readyState < HTMLMediaElement.HAVE_METADATA) return
-    if (audio.ended && time > audio.duration - SOUNDTRACK_SLACK) return
-    if (audio.paused || Math.abs(audio.currentTime - time) > SOUNDTRACK_SLACK) this.playSoundtrack()
+    this.soundtrack.playbackChanged(playing)
   }
 
   volumeChanged() {
-    if (this.soundtrack) this.soundtrack.volume = MathUtils.clamp(this.volume, 0, 1)
+    if (this.soundtrack) this.soundtrack.volume = this.volume
   }
 
   /**
@@ -888,9 +843,7 @@ export class Fold extends Document implements PlaybackListener, CaptureListener 
 
   override dispose() {
     this.playing = false
-    this.soundtrack.pause()
-    this.soundtrack.removeAttribute('src')
-    this.soundtrack.load()
+    this.soundtrack.dispose()
     this.terrain.dispose()
     this.skyDome.dispose()
     this.environmentSky.dispose()
@@ -979,7 +932,7 @@ registerEditor(Fold, {
       'celestialFrame', 'sunDirection', 'moonDirection', 'cameraTarget', 'flightAngle', 'indirectLevel', 'lightingTick',
       'terrainVersion', 'animating', 'animationTick', 'terrainDraft', 'environmentVersion',
       'lightingVersion', 'litDirection', 'litPreExposure', 'renderers', 'cloudsAt', 'animatedAt', 'soundtrack', 'playing',
-      'soundtrackHeld', 'captureStage',
+      'captureStage',
     ],
   },
 })

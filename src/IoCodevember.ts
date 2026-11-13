@@ -3,12 +3,12 @@ import { IoField, ioField, ioButton } from '@io-gui/inputs'
 import { IoPropertyEditor, ioPropertyEditor } from '@io-gui/editors'
 import { ioOptionSelect, Menu } from '@io-gui/menus'
 import { Object3D } from 'three/webgpu'
-import { SelectionModel, Document, Editor, View, ViewOverlays, ThreeViewport, threeTimeline, threeScenegraph, threeViewSettings, renderScheduler, ScheduledTicker } from '@io-gui/three'
+import { BehaviorPriority, SelectionModel, Document, Editor, View, ViewOverlays, ThreeViewport, threeTimeline, threeScenegraph, threeViewSettings, renderScheduler, ScheduledTicker } from '@io-gui/three'
 import { ioLayout, IoTab, Layout } from '@io-gui/layout'
 import { threeEditorStatus } from './ThreeEditorStatus.js'
 import { documentHeader } from './DocumentHeader.js'
 import { drawnViewport, DocumentDrawn, DrawnViewport } from './DrawnViewport.js'
-import { CaptureOptions, CaptureResult, FrameCapture, pickCaptureDirectory } from './Capture.js'
+import { CaptureOptions, CaptureResult, FrameCapture, checkCaptureOptions, pickCaptureDirectory } from './Capture.js'
 
 const editorLayout = new Layout({
   child: {
@@ -80,12 +80,12 @@ const DOCUMENTS: Record<string, () => Promise<Document>> = {
   // Tangle: () => import('./days/Tangle.js').then(module => new module.Tangle()),
   // Moss: () => import('./days/Moss.js').then(module => new module.Moss()),
   // Orrery: () => import('./days/Orrery.js').then(module => new module.Orrery()),
-  // Hollow: () => import('./days/Hollow.js').then(module => new module.Hollow()),
+  Hollow: () => import('./days/Hollow.js').then(module => new module.Hollow()),
   // Tesseract: () => import('./days/Tesseract.js').then(module => new module.Tesseract()),
   // Membrane: () => import('./days/Membrane.js').then(module => new module.Membrane()),
   // Caustic: () => import('./days/Caustic.js').then(module => new module.Caustic()),
   // Rust: () => import('./days/Rust.js').then(module => new module.Rust()),
-  // Feather: () => import('./days/Feather.js').then(module => new module.Feather()),
+  Feather: () => import('./days/Feather.js').then(module => new module.Feather()),
   // Labyrinth: () => import('./days/Labyrinth.js').then(module => new module.Labyrinth()),
   // Tension: () => import('./days/Tension.js').then(module => new module.Tension()),
   // Mirage: () => import('./days/Mirage.js').then(module => new module.Mirage()),
@@ -177,7 +177,8 @@ const VIEW_OVERLAYS: ViewOverlays = {
  * playing, to play its sound with the timeline.
  * Until a viewport has drawn the document asked for (`DrawnViewport`), a loading cover hides the editor and timeline.
  * Fullscreen (Escape leaves it) hides the editor and shows the document through its own camera view and viewport,
- * outside the layout: a viewport of exactly the camera's frame on black, with the timeline and the document's header under it.
+ * outside the layout: a viewport of exactly the camera's frame on black, with the timeline and the document's header under it;
+ * clicking the viewport while paused plays it.
  * Click selects (Shift toggles, Ctrl removes), Alt+drag box-selects, Ctrl+A selects all, Escape clears, F frames the
  * selection. Drag a gizmo arrow to move along an axis, the center to move in the view plane; X / Y / Z switch the
  * axis while dragging, Escape or right click cancels. Tab enters edit mode on the selection; 1 / 2 / 3 pick points,
@@ -304,7 +305,7 @@ export class IoCodevember extends ReactiveElement {
     perspective: new View({overlays: VIEW_OVERLAYS}),
     uv: new View({kind: 'uv', profile: 'select' }),
     camera: new View({profile: 'select', overscan: 1, overlays: { cameraFrame: true }}),
-    fullscreen: new View({profile: 'select', overscan: 1}),
+    fullscreen: new View({profile: 'none', overscan: 1}),
   })
   declare views: Record<'top' | 'bottom' | 'left' | 'right' | 'front' | 'back' | 'perspective' | 'uv' | 'camera' | 'fullscreen', View>
 
@@ -444,6 +445,7 @@ export class IoCodevember extends ReactiveElement {
   async capture(options: CaptureOptions = {}): Promise<CaptureResult> {
     if (this._capture) throw new Error('capture: already capturing (stopCapture() stops it)')
     if (this.loading) throw new Error('capture: the document is still loading')
+    checkCaptureOptions(options)
     // the picker first, while the gesture that asked for the capture counts
     const directory = await (options.directory ?? pickCaptureDirectory())
     const document = this.editor.document
@@ -588,6 +590,16 @@ export class IoCodevember extends ReactiveElement {
       threeEditorStatus({editor: this.editor}),
       div({class: 'loading'}, 'loading'),
     ])
+
+    const fullscreen = this.querySelector('#Fullscreen') as DrawnViewport
+    fullscreen.inputRouter.add({
+      priority: BehaviorPriority.modal,
+      click: event => {
+        if (event.button !== 0 || !this.fullscreen || this.loading || this.capturing || this.editor.isPlaying) return false
+        this.editor.isPlaying = true
+        return true
+      },
+    })
   }
 
   editorMutated() {
