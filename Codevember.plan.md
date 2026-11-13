@@ -125,6 +125,21 @@ todos:
   - id: feather-verify
     content: "Day 12 (Feather): unit tests, headless WebGPU visual verification against reference macro photo (real-time + multi-sampled capture), inspector polish, typecheck/lint/build"
     status: completed
+  - id: rust-plan
+    content: "Day 11 (Rust): research (rust phase morphology, Evans drop + secondary spreading, Stratmann wet/dry, SEM image formation) + bake-then-evaluate architectural plan in Codevember.plan.md"
+    status: completed
+  - id: rust-phase1-bake
+    content: "Day 11 (Rust) Phase 1: adjustable exposure clock (exposureDays, secondsPerDay) + climate, steel microstructure, sea-salt scatter + daily deposition + hygroscopics + drops/coalescence/microdroplets, nested core/surround GPU multigrid electrochemistry/transport/precipitation/phase bake, snapshots + nucleation events, fieldView debug + section slice, unit tests"
+    status: pending
+  - id: rust-phase2-surface-sem
+    content: "Day 11 (Rust) Phase 2: steel/crust height-field surface, SemSignal (secant SE, edge/thin, BSE Z, detector visibility, cavity, detector modes), SemImage (noise, scan reveal, optional data bar), stage camera (Surface, Overview, Free)"
+    status: pending
+  - id: rust-phase3-crystals
+    content: "Day 11 (Rust) Phase 3: instanced habits from nucleation events (lepidocrocite rosettes, goethite cotton balls/needle flowers, akaganeite spindles, magnetite octahedra, green rust hexagons, NaCl cubes/hoppers/dendrites), GPU cull/LOD/indirect, cracks, tubercles, drops"
+    status: pending
+  - id: rust-phase4-session-capture
+    content: "Day 11 (Rust) Phase 4: crack walls/flake edges with inner bands, Session choreography (wide surface pull-out, loop fade + new seed), color modes calibrated to refs, capture (CapturePrepare hook, round beam aperture), headless verification vs refs, checks"
+    status: pending
 isProject: false
 ---
 
@@ -300,7 +315,7 @@ Open items:
 
 **Hollow** is a photorealistic procedural karst limestone cavern composed for `2.39:1` CinemaScope (`1 unit = 1 m`), translating the reference cave's complementary chiaroscuro and geology into widescreen ([`docs/refs/hollow-cave.jpg`](docs/refs/hollow-cave.jpg)):
 - **Cool Cyan Skylight (`#3998d1`–`#96cfdc`):** Single upper-rear karst sinkhole opening pouring bluish daylight, crepuscular shafts, and misty haze (`#6c919f`) down onto terraced travertine steps (`gours`).
-- **Warm Off-Screen Firelight (`#b07536`–`#ff9438`):** Hidden flame source in an alcove **behind the cinema camera plane** (never in frame)—bathing left stratified ledges, pagoda stalagmites, ceiling stalactite curtains (`#845737`), and foreground scalloped **rimstone dam (`gour`) pool** (`#a56b32` basin, `#784c2a` lip) in breathing amber-gold glow.
+- **Warm Off-Screen Firelight (`#b07536`–`#ff9438`):** Hidden flame source in an alcove **behind the cinema camera plane**—never in frame—bathing near ledges, pagoda stalagmites, ceiling curtains (`#845737`), and the foreground scalloped **rimstone dam (`gour`) pool** (`#a56b32` basin, `#784c2a` lip) in breathing amber-gold spill.
 - **Meandering Mirror Lake & Droplets (`#1b88b0` / `#6bbbd6`):** Dead-still subterranean pool winding from lower-left foreground around the rimstone dam and a cleaved right-hand boulder toward rear cascade steps; sporadic water droplets detach from ceiling stalactites and trigger dispersive concentric ripple patterns that bend the mirror reflection and rebound off rocky shores.
 - **Framing (`fov ≈ 40°`):** Foreground wet fractured dark limestone benches (`#51474c`) and right-hand fluted drapery buttress (`#433943`) frame the cavern depth (`repoussoir`).
 
@@ -320,7 +335,7 @@ Split into two reviewable milestones so cavern architecture, proportions, water 
    - **Bounds:** `X ∈ [-14, 14] m`, `Y ∈ [-3, 11] m`, `Z ∈ [-28, 8] m`.
    - **Meandering Cavern Spine:** S-curved centerline $(x_c(z), y_{\text{floor}}(z))$ sweeping an asymmetric vaulted cross-section:
      - *Main Flooded Grotto (`z ∈ [-10, +6]`):* Lake basin below $y = 0$, vaulted ceiling $y \approx 5.5\text{–}7.2\,\text{m}$ scored by diagonal joint-guided **ceiling dissolution ribs** (matching reference upper-left-to-center stalactite arcs).
-     - *Warm Travertine Gallery & Behind-Camera Fire Alcove:* Stepped rock shelf opposite the hero boulder; fire pocket sits at $z > z_{\text{camera}}$ (behind the cinema plane) so only amber spill reads in frame.
+     - *Left Travertine Gallery & Occluded Fire Alcove (`x < -3`, `z ∈ [-9, -1]`):* Stepped horizontal rock shelf ($y \approx 0.9\text{–}2.8\,\text{m}$) with recessed side pocket (`x ≈ -9.5, z ≈ -5.5`) shielded from camera sightlines by a natural limestone pillar.
      - *Rear Cascade & Skylight Shaft (`z ∈ [-25, -10]`):* Floor climbs $y = 0 \to +2.4\,\text{m}$ via 8–12 scalloped horizontal travertine `gour` steps beneath an angled karst chimney opening to the sky at `(x ≈ +2.5, y ≈ +9.5, z ≈ -20)`.
      - *Foreground Rimstone Dam (`x ≈ -2.8, z ≈ +1.2`):* Kidney-shaped raised calcified rim (`smin` fused to left shore) enclosing a shallow flat mineral basin just above lake level.
    - **Lithological Sculpting in SDF:** Continuous bed-competence terracing (`terrace(y + dip)`) cuts horizontal limestone strata ledges into walls; phreatic dissolution noise carves ceiling cupolas. All structural unions use polynomial `smin(a, b, k)` (`k = 0.6–1.4 m` vaults, `k = 0.1–0.25 m` terraces) for $C^1$ topological fillets.
@@ -388,19 +403,17 @@ Split into two reviewable milestones so cavern architecture, proportions, water 
 ### Todo Breakdown
 
 - [x] **1. Plan & Design (`hollow-plan`):** Two-phase architectural plan in `Codevember.plan.md`.
-- [ ] **2. Phase 1A — Karst SDF & Surface Nets Cavern (`hollow-phase1-karst-shell`):** Seeded S-bend cavern + skylight + terraced `gours` + rimstone dam + hidden fire alcove SDF, Surface Nets shell mesh, `128×64×160` GPU 3D SDF/normal volume, and unit tests.
-- [ ] **3. Phase 1B — Rocks, Dripstones & Blockout Review (`hollow-phase1-rocks-speleothems`):** Voronoi-cleaved boulders, rib-guided stalactites (with drip emitters), pagoda stalagmites, fluted draperies, collar skirts, `Cinema` / `Cutaway` blockout materials, enable `Hollow` in `IoCodevember.ts` for layout review.
-- [ ] **4. Phase 2A — Baked GI, Fire Rig, Area Lights & Volumetrics (`hollow-phase2-lighting-volumetrics`):** Dual `LightProbeGrid` bake (`sky` + live-scaled `fire`), `RectAreaLight`s, parallax PMREM specular probes, `scene.fogNode` + in-scene volumetric skylight shafts.
-- [ ] **5. Phase 2B — Mirror Lake & Dispersive Droplet Ripples (`hollow-phase2-lake-droplets`):** `ReflectorNode` + shallow Beer–Lambert refraction, falling droplets from stalactite tips, `512²` capillary-gravity wave compute with SDF shoreline reflections.
-- [ ] **6. Phase 2C — Clearcoat Lithology, Mesh Blending & Polish (`hollow-phase2-materials-blending-verify`):** GPU `1024²` procedural rock/travertine atlases, world-space derivative triplanar, SDF normal/AO mesh blending, wet clearcoat + calcite translucency, `CaptureDefaults`, headless WebGPU verification.
+- [x] **2. Phase 1A — Karst SDF & Surface Nets Cavern (`hollow-phase1-karst-shell`):** Seeded S-bend cavern + skylight + terraced `gours` + rimstone dam + behind-camera fire alcove SDF, Surface Nets shell mesh, GPU 3D SDF/normal volume, unit tests. Default seed `1056`.
+- [x] **3. Phase 1B — Rocks, Dripstones & Blockout Review (`hollow-phase1-rocks-speleothems`):** Voronoi-cleaved boulders, rib-guided stalactites (with drip emitters), pagoda stalagmites, fluted draperies, collar skirts, `Cinema` / `Cutaway`, seed-driven composition archetypes.
+- [x] **4. Phase 2A–C wired into `Hollow.ts` (`hollow-phase2-*`):** Dual `LightProbeGrid` bake + live fire, `HollowWater` reflector/droplets/ripples, volumetrics shafts/fog, wet clearcoat triplanar rock material. Still needs visual polish / bake tuning / CaptureDefaults / headless verify.
 
-### Locked Decisions
+### Locked Decisions (2026-11-13)
 
-1. **Camera motion:** Keep subtle looping dolly / lateral track (`trackForward` / `trackLateral` / `trackLookDrift`).
-2. **Rimstone (`gour`) pool water:** Own elevated shallow amber meniscus (`RIMSTONE_POOL_STEP ≈ +8.5 cm` above main lake).
-3. **Audio:** Silent for now (no `Soundtrack` until later).
-4. **Warm light placement:** Fire alcove always behind the cinema camera plane so only spill/atmosphere reads in frame.
-5. **Seed hunting:** Seed must reshuffle major composition landmarks (spine, skylight, lake/rimstone, galleries, fire, camera base pose, hero rock side) so many seeds yield distinct widescreen frames.
+1. **Camera:** Keep subtle looping dolly / truck / pan (`trackForward` / `trackLateral` / `trackLookDrift`).
+2. **Rimstone pool:** Own elevated shallow amber meniscus (`RIMSTONE_POOL_STEP ≈ +8.5 cm`), separate from main lake reflector at `y = waterLevel`.
+3. **Audio:** Silent for now (no `Soundtrack` on Hollow).
+4. **Warm light:** Fire origin always behind the cinema camera plane (alcove + spill only; never in frame).
+5. **Seed hunting:** Seed must reshuffle major composition landmarks (spine, skylight, rimstone side/placement, camera pad, galleries, wall spans, cascade, fire side) so seed-hunting finds distinct widescreen frames — not micro-noise only. Default demo seed `1056` (good frame); do not overfit geometry to it — scene must hold across random seeds.
 
 ## 8. Tesseract
 
@@ -409,6 +422,387 @@ Split into two reviewable milestones so cavern architecture, proportions, water 
 ## 10. Caustic
 
 ## 11. Rust
+
+### Vision & Concept
+
+**Rust** is an SEM time-lapse (`1 scene unit = 1 µm`) of polished low-carbon steel rusting through ~30 compressed days of marine humidity cycles. It centres on one large sea-salt crystal among a scatter of smaller ones, and the view can widen to the surrounding surface, where nearby drops rust, meet and merge. A bright, scratched ferrite–pearlite surface becomes a cracked, laminated crust bristling with lepidocrocite "desert roses", goethite "cotton balls", akaganeite spindles and magnetite octahedra. It is drawn the way a scanning electron microscope sees, not lit like a photograph:
+- secondary-electron contrast: tilted faces and edges bright, pits black, soft shadows toward the detector;
+- raster noise and slow-scan reveals;
+- optionally, a data bar with the scale bar and the exposure clock;
+- false color after the references (tan rust, blue-white edges, steel-blue metal), with the authentic grayscale as a mode.
+
+**References**
+
+The user's four images are in `~/Downloads`. They are watermarked stock, so they stay out of the repo.
+- `rust1.jpeg` (false color): the outer layer. Rosettes of thin curved plates sit on a lumpy, porous crust, with one ovoid globule of fine lamellae. Exposed edges are blue-white, hollows tan.
+- `rust4.jpg` (false color): rust advancing over grey steel along grooves. Pitted bare metal lies ahead; behind it, granular rust in flow-like ridges along the grooves.
+- `rust2.webp` (false color): blue feathery dendrites hang from a porous crust over a smooth, rippled floor. This is growth into open space, an overhang seen from the side.
+- `rust3.jpg` (grayscale SE): a ridge of faceted blocky crystals with growth terraces over fine granular rust, black behind. This is the Everhart–Thornley look: light from one side, glowing edges.
+- [Maxon CRS page](https://maxontechnologies.com/crs-rust-penetration-sem-photos/): a penetrant's marketing page. Its backscatter-composition SEM images (20 kV, ×30 and ×150) and its optical micrographs are polished cross-sections of thick rust:
+  - 172–296 µm thick, laminated in wavy bands;
+  - cracked parallel to the surface, with voids;
+  - tongues reaching ~100 µm into the steel.
+
+  They guide the crust's inner structure; the film has no section shot. Rust keeps a band for each wet/dry cycle, and that structure shows wherever the crust opens: crack walls, flake edges, broken tubercle caps.
+
+**Prior art**
+
+Real-time records of corrosion exist only at other scales or with other instruments:
+- liquid-cell TEM of carbon steel at the nanoscale: faceted pits at a phase boundary ([npj Mater. Degrad. 2019](https://link.springer.com/10.1038/s41529-019-0078-1));
+- in-situ Raman and optical microscopy of NaCl particles on carbon steel: pits within minutes, green rust next to the pit, lepidocrocite clusters outside (Li & Hihara, J. Electrochem. Soc. 2012);
+- ESEM of salt deliquescence.
+
+No SEM-like 3D animation of rust forming turned up.
+
+### Research: What the Film Must Get Right
+
+**Electrochemistry**
+- **Reactions:** anode $\mathrm{Fe \to Fe^{2+} + 2e^-}$; cathode $\mathrm{O_2 + 2H_2O + 4e^- \to 4OH^-}$; then $\mathrm{Fe^{2+} + 2OH^- \to Fe(OH)_2}$ or green rust, oxidized on to the FeOOH phases.
+- **Evans drop:**
+  - O₂ reaches the drop's thin rim, which becomes the cathode and turns alkaline.
+  - The thick centre starves of O₂ and becomes the anode. Fe²⁺ hydrolysis acidifies it and draws chloride in.
+  - Rust precipitates in a ring between the two.
+  - Electrolyte resistance matters little under a drop: the Wagner length $\sqrt{\kappa h R_p}$ is ~2 mm at h = 10 µm. In the thin spreading film it does matter (~0.2 mm at 0.1 µm). So under the drop, O₂ access, pH-dependent passivity and chloride separate anode from cathode.
+- **Secondary spreading:** measured on pure iron, 3.5% NaCl, 85% RH ([Frontiers in Chemistry 2021](https://www.frontiersin.org/journals/chemistry/articles/10.3389/fchem.2021.610738/full); first described by Tsuru, Tamiya & Nishikata, Electrochim. Acta 2004).
+  - Microdroplets appear around the drop at once. They are smaller with distance and reach 44–328 µm from its edge after 5–45 min.
+  - They are cathodic and alkaline: O₂ is reduced to OH⁻, and Na⁺ migrates out through a thin film.
+  - Brown Fe(OH)₃ forms in the fringe, where Fe²⁺ meets OH⁻ and O₂.
+  - Anode–cathode potential difference 0.36 V; peak anodic current 764 µA/cm² (≈ 1 µm/h of iron), peak cathodic 152 µA/cm².
+- **Critical drop size** (Li & Hihara 2016): a NaCl drop corrodes low-carbon steel only above ~40–100 µm (ultrapure iron: 150–200 µm).
+- **Pits start at MnS inclusions** (Muto, Chiba et al.): the sulfide dissolves and leaves sulfur, the steel dissolves along the MnS/steel boundary into a trench, and the trench acidifies. Pits cap themselves with rust. Tubercles have an outer crust, an inner magnetite shell and a goethite/lepidocrocite core.
+- **Wet/dry cycle** (Stratmann & Müller 1994):
+  - Wetting: lepidocrocite is reduced (to Fe(II), magnetite) and serves as the oxidant, so the steel dissolves fast.
+  - Wet: O₂ is reduced.
+  - Drying: the film thins, so the O₂ flux and the corrosion rate peak; then the reduced rust re-oxidizes.
+  - Magnetite conducts nearly like a metal.
+- **Fe(II) oxygenation** (Stumm & Lee 1961): $-d[\mathrm{Fe^{2+}}]/dt = k[\mathrm{OH^-}]^2 p_{O_2}[\mathrm{Fe^{2+}}]$, $k ≈ 8×10^{13}\ \mathrm{M^{-2}\,atm^{-1}\,min^{-1}}$. The half-life is 4 min at pH 7, 7 h at pH 6 and 2.5 s at pH 8, which decides which phase forms where.
+- **O₂ through the film:** $i_{\lim} = 4FD_{O_2}C_{O_2}/h$ is 1.9 mA/cm² at 10 µm and 0.19 at 100 µm (D 2×10⁻⁹ m²/s, C 0.25 mol/m³, less in brine).
+- **Salt:**
+  - NaCl deliquesces at 75.3% RH and effloresces at ~45%. Between the two a drop stays liquid (hysteresis).
+  - Less than 100 nm of water adsorbs on the crystal first, and deliquescence starts at contacts ([J. Chem. Phys. 2011](https://wpw.bnl.gov/schwartz/wp-content/uploads/sites/11/2022/04/bruzewiczjcp11nacl.pdf), [ETEM/ESEM study](https://par.nsf.gov/servlets/purl/10534661)).
+- **Akaganeite** forms at RH ≳ 80% and chloride ≳ 60 mg/m²/day (Morcillo et al., Corrosion 2015). It accelerates corrosion, and layers containing it exfoliate.
+- **Rates:**
+  - ISO 9223 first-year rates for carbon steel: C5 80–200 µm/yr, CX 200–700.
+  - Rates fall with time: SAE 1020 steel 10 m from the sea went from 141 µm/yr at 14 days to 41 µm/yr at 50 days ([Costa et al. 2019](https://pmc.ncbi.nlm.nih.gov/articles/PMC6895721/)).
+  - Faraday: 1 A/m² ≡ 1.16 mm/yr ≡ 0.037 nm/s.
+- **Volume:** rust takes up more room than the iron it consumes (molar volumes from densities): 2.10× for magnetite, 2.94× goethite, 3.06× lepidocrocite, ~3.5× akaganeite and ferrihydrite, and more with porosity. So the crust heaves, cracks and flakes.
+
+**Morphology in the SEM, and place in the layer**
+
+Sizes marked "est." are read off the references; the others are from the sources.
+- **Lepidocrocite γ-FeOOH** (outermost): "globular and laminar" (Morcillo/de la Fuente group, SEM/micro-Raman of marine rust, 2016).
+  - Laminar means thin curved plates in rosettes ("flowery", desert roses: ref 1). Plates are ~1–4 µm across (est.) and tens of nm thick: lath-like (Cornell & Schwertmann, *The Iron Oxides*).
+  - Forms from fast oxidation of Fe(II) or green rust near neutral pH, as in drying films.
+- **Goethite α-FeOOH** (inner):
+  - semicrystalline "cotton balls", globules a few µm across (Raman et al., Corrosion 1986);
+  - crystalline needle bundles like "pointed flowers", ~5–10 µm ([Antunes & Costa](https://repositorio.ipen.br/bitstreams/ff3d7f15-aa10-4347-b7e0-5265a17e919e/download), at 4000×);
+  - needles ~0.1–1 µm (115 nm wires, Costa et al. 2019).
+
+  Forms from slow oxidation or acidic films, and from lepidocrocite aging.
+- **Akaganeite β-FeOOH**: in chloride-rich zones next to the steel, under salt and in pits. Spindle or cigar-shaped rods (somatoids) ~0.2–1 µm long, in rosette-like clusters.
+- **Magnetite Fe₃O₄**: next to the steel, in O₂-starved pits and in tubercle shells. Octahedra, or "flattened plates and circular grains" (Antunes & Costa).
+- **Green rust** (Fe(II)–Fe(III) layered hydroxide with Cl⁻): hexagonal plates ~0.4–0.5 µm ([fougerite](https://www.cambridge.org/core/journals/clays-and-clay-minerals/article/abs/fougerite-a-new-mineral-of-the-pyroauriteiowaite-group-description-and-crystal-structure/D266CBE0520A29CFDD92D806BA5E072A)) up to µm. Transient near anodes; turns into lepidocrocite or goethite in air.
+- **Ferrihydrite / Fe(OH)₃**: amorphous brown gel, the first fringe. It cracks as it dries.
+- **NaCl**: cubes. When the film dries fast: hopper crystals (stepped, skeletal) and dendrites with right-angle (⟨100⟩) branches. These match ref 2's feathers and ref 3's terraces.
+- **Steel**:
+  - Microstructure: ferrite grains ~10–30 µm; pearlite colonies, ~11% of the area at 0.1% C (lever rule), with lamellae 0.2–0.5 µm apart; MnS stringers along the rolling direction; polishing scratches.
+  - Corrosion etches the grains by orientation into facets, grooves the grain boundaries and leaves the cementite lamellae standing.
+  - Solution wicks along the scratches (Concus–Finn), so rust follows them (ref 4).
+
+**SEM image formation** (Goldstein et al., *SEM and X-Ray Microanalysis*, 2018)
+- **Secondary electrons:** the yield rises with tilt, $\delta(\theta) = \delta_0/\cos\theta$ ([Cazaux 2002](https://core-prod.cambridgecore.org/core/services/aop-cambridge-core/content/view/27A870C2E53480328CF4C7D2C1C6D17C/S1431927602101887a.pdf/about-the-topographic-contrast-in-lvsem.pdf)). Edges and thin features are bright, because the interaction volume reaches more surface. Cavities are dark: their electrons are reabsorbed or never reach the detector.
+- **Everhart–Thornley detector** (to one side, collector biased positive): the image looks as if seen from the beam and lit from the detector, with shadows softened by the collected electrons (the "light-optical analogy").
+- **In-lens detector:** little shadowing, more surface detail.
+- **Backscatter:** Z contrast. Reuter's fit $\eta = -0.0254 + 0.016Z - 1.86×10^{-4}Z^2 + 8.3×10^{-7}Z^3$ (mass-weighted Z̄) gives steel 0.28, magnetite 0.24, MnS 0.24, FeOOH 0.22, NaCl 0.17, water 0.08.
+- **Interaction range** (Kanaya–Okayama, $R = 0.0276\,A\,E^{1.67}/(Z^{0.89}\rho)$ µm):
+
+  | Beam | Iron | FeOOH | Water |
+  | --- | --- | --- | --- |
+  | 5 kV | 0.16 µm | 0.26 µm | |
+  | 15 kV | 1.0 µm | 1.6 µm | |
+  | 20 kV | | | ~9 µm |
+
+  So thin water and thin plates are translucent to the beam.
+- **Depth of field:** $D ≈ 2r_{px}/\alpha$ with a convergence angle α of 1–10 mrad, tens of µm at these magnifications. The beam cone acts as a thin lens with a round aperture. The projection is close to parallel at high magnification (field < 5°).
+- **Raster:**
+  - The image builds one line at a time.
+  - Shot noise goes as √N per pixel: noisy at fast scan, clean at slow scan.
+  - Mains interference makes lines jitter, and a scan line is visible on slow scans.
+  - In an ESEM, the gas scatters a skirt of beam electrons, which lowers contrast.
+- **ESEM:** images wet samples on a Peltier stage (RH = p_H₂O / p_sat(T)). Water shows as smooth, darker caps.
+
+**Idealizations**, stated once and then kept:
+- The microscope only watches: no beam damage, ambient-air O₂ (a real ESEM's low O₂ would slow the corrosion), the same spot in every frame.
+- The model is a reduced 2D thin-film model calibrated to the numbers above, not a predictor.
+- About 30 days are compressed into ~3 min (`exposureDays` 30 at `secondsPerDay` 5, both adjustable).
+
+### Architecture & Technical Breakdown
+
+**Key decision: bake, then evaluate.**
+- A deterministic GPU simulation runs ahead of the playhead and records snapshots and crystal nucleation events.
+- Everything drawn is a function of timeline time.
+- Unlike Feather, the film can be scrubbed, captured over any range without pre-roll, and motion-blurred.
+
+1. **Units, files, seed**
+   - `1 unit = 1 µm`, y up. Two nested domains (x, z): a 640 × 640 µm core around the hero crystal, and a 2.56 × 2.56 mm surround for the wide view.
+   - `seed` drives the microstructure, salt, weather, cracks and nucleation (hashes of seed, texel and step).
+   - Files: `src/days/Rust.ts` (Document: properties, inspector, effects, capture) plus `src/days/rust/`:
+     - `RustClock`, `RustSteel`, `RustSalt`
+     - `RustMultigrid`, `RustChemistry`
+     - `RustSurface`, `RustCracks`, `RustCrystals`
+     - `SemSignal`, `SemImage`, `RustStage`
+
+     Tests cover the clock, the salt and chemistry formulas, and the SEM constants.
+   - TSL follows CLAUDE.md and working.md:
+     - heavy shared code as layout `Fn`s, with uniforms passed in as arguments;
+     - ≤ 8 storage buffers and ≤ 4 writable storage textures per compute, so fields are packed as vec4;
+     - `.negate()`, and `.toVar()` before writes;
+     - `colorNode`/`positionNode`, not `fragmentNode`.
+
+2. **Exposure clock & climate (`RustClock.ts`, CPU → uniforms)**
+   - Timeline τ maps monotonically to exposure time t. The first hour takes ~25 s: deliquescence, microdroplets, first pits. After that, `secondsPerDay` (default 5) per day up to `exposureDays` (default 30), ~180 s in all, so each day shows as one breath of RH. The timeline's duration follows from the two. Changing the pace only remaps time (no rebake); adding days extends the bake. The data bar and the stage read the clock.
+   - Climate for each seeded day: night RH 90–95% (dew), afternoon 50–60%, and some days below 45% so the salt effloresces. Temperature is fixed.
+   - Also functions of t: the Stratmann stage (wetting, wet, drying, dry) and each salt deposit's state (deliquesced or crystalline, with hysteresis).
+
+3. **Steel (`RustSteel.ts`; compute once per seed at 2048², 0.31 µm)**
+   - **Ferrite grains:** relaxed Voronoi, mean ~18 µm. Each grain has an orientation that sets its dissolution rate (0.75–1.3×) and the facet frame of its etch pits. Grain boundaries dissolve faster (1.6×, tunable).
+   - **Pearlite colonies:** `carbon` 0.1% gives ~11% of the area, lamellae 0.3 µm apart. Cementite is cathodic and stays, so it stands as ridges as the ferrite between dissolves.
+   - **MnS stringers** along x: 2–20 × 0.5–2 µm, one per ~2,000 µm² (tunable). Each opens a trench, then a pit.
+   - **Polishing scratches:** one direction family plus a few strays, 0.1–1.5 µm wide and 20–200 nm deep. Solution wicks faster along them: film conductance is anisotropic and footprints elongate.
+   - **Output:** height, grain hash, constituent, scratch depth and an anodic multiplier.
+
+4. **Salt & electrolyte (`RustSalt.ts`; CPU state, evaluated analytically on the GPU)**
+   - **Deposits:** a seeded sea-salt scatter over the whole surface, sizes log-normal (1–40 µm), ~20 µg/cm² NaCl (tunable):
+     - The hero, a ~28 µm cube near the core's centre, makes a ~160 µm drop at 85% RH, past the critical size.
+     - A few neighbours of 15–25 µm rust too, so rings form, meet and merge. Drops that touch at high RH coalesce (volume conserved).
+     - The many small ones (1–12 µm) are sub-critical: they wet and spread but don't rust.
+     - Fresh particles land each day (`chlorideDeposition`, mg/m²/day; ~100 by default, past the akaganeite threshold). They stay crystals on dry days and dissolve into the film on wet ones.
+   - **Hygroscopic growth:** molality from water activity (NaCl fit, Tang et al.) gives the volume. Deliquescence at 75.3%, efflorescence at 45%.
+   - **Shape:**
+     - Spherical caps; the Bond number is ~10⁻³, so gravity doesn't matter.
+     - Contact-angle hysteresis: the footprint advances at ~45°, stays pinned while drying down to ~10°, then recedes.
+     - Footprints stretch along the scratches.
+     - Footprints grow over the cycles as rust wicks the solution (a CPU rule, no readback).
+   - **Secondary spreading:**
+     - An alkaline film spreads from the drop's cathodic edge, and microdroplets condense in it.
+     - They are placed by Poisson disk, out to ~150–330 µm over ~45 min. Sizes run from ~15 µm near the edge to ~1 µm far out, merging near the edge.
+     - Each microdroplet is a small cathodic cap.
+   - **Adsorbed film:** thickness from RH: nm on bare steel, 10–100 nm on salty, porous rust. It conducts only where there is salt.
+   - **Per step:** film thickness h(x) and the wet component it belongs to.
+
+5. **Electrochemistry & transport bake (`RustChemistry.ts`, `RustMultigrid.ts`; GPU, progressive)**
+   - **Grids:** two 512² grids, nested one way: the surround at 5 µm (2.56 mm) and the core at 1.25 µm (640 µm), which takes its edge values from the surround. Fields, rgba32f:
+     - in the film: Fe²⁺, OH⁻ (pH), Cl⁻, Na⁺ and the electrolyte potential φ;
+     - in the solid: metal loss, rust volume per phase (green rust, ferrihydrite, lepidocrocite, goethite, akaganeite, magnetite), Fe(II) held in the rust, porosity and solid salt.
+   - **Kinetics per texel (Tafel):**
+     - Anodic: $i_a = i_{a0}\,A(\mathbf{x})\,e^{(E_m-\phi-E_{Fe})/b_a}$. The activity A multiplies chloride activation, pH (faster in acid, passive above pH ~10), the steel multiplier, the MnS trench and (1 − cover by the dense inner layer).
+     - O₂ reduction is limited by diffusion through the film and the rust, $i_{\lim} = 4FDC/(h + \tau h_{rust})$, and is kinetic on very thin films.
+     - On wetting, lepidocrocite is reduced (Stratmann).
+   - **Potential:**
+     - $\nabla\cdot(\kappa h\nabla\phi) = i_a + i_c$ in each wet patch, with no flux across the contact line.
+     - κ comes from the chloride (brine 5–22 S/m), and the kinetics are linearized (Newton) into a screening term.
+     - Each patch balances its own charge, so an isolated microdroplet carries no current until the film joins it.
+   - **Transport:**
+     - Backward-Euler diffusion and migration: Cl⁻ toward anodes, Na⁺ toward cathodes. Steps of minutes are far beyond dx²/D, hence the implicit solver.
+     - Conservative and masked to the wet region.
+     - Whatever is dissolved precipitates as the film dries (salt crusts).
+   - **Solver:** geometric multigrid V-cycles with red-black smoothing.
+     - Coarse faces sum the conductance of their fine faces; dry faces conduct 0.
+     - Warm-started from the previous step, 1–2 cycles per field per step.
+   - **Reactions:**
+     - hydrolysis, which acidifies the anodes;
+     - Fe(OH)₂ or green rust past $K_{sp} ≈ 5×10^{-17}$;
+     - Stumm–Lee oxygenation with the local pH and O₂.
+   - **Phase rules:**
+     - green rust: Fe²⁺ in excess with Cl⁻ and little O₂ (by the anodes, while wet); transient;
+     - ferrihydrite: very fast oxidation at high supersaturation (the first brown fringe);
+     - lepidocrocite: fast oxidation at pH 6–8 (drying films, the outer layer); green rust converts to it on drying;
+     - goethite: slow oxidation or acid, and lepidocrocite aging over days (inner layer);
+     - akaganeite: high Cl⁻ and acid (pits, under the salt, at the steel);
+     - magnetite: Fe(II) without O₂ (pit bottoms, at the steel, tubercle shells), and lepidocrocite reduced on wetting.
+   - **Where rust deposits:** each precipitate adds volume × molar-volume ratio / (1 − porosity) where it forms:
+     - at the anode–cathode boundary (the ring);
+     - at pit mouths (caps over an occluded cell);
+     - at the drop's air surface (skins);
+     - at the pinned edge while drying (coffee ring).
+   - **Steel loss:** Faraday × the steel's multiplier; cementite stays.
+   - **Steps:**
+     - Adaptive in exposure time: seconds early, ~10 min late. About 100 per wet/dry cycle, ~4k in all.
+     - Run in `onBeforeDraw` within ~6 ms a frame, less when frames are slow (battery), and at least twice as fast as playback needs.
+     - If the bake falls behind, the playhead is held (clamped in `onAnimate`).
+     - A new seed, or a change to the specimen or climate, rebakes.
+   - **Snapshots:**
+     - Taken once per cycle, more often early. Each holds the steel height, crust top, crust bottom (voids under caps) and the top layer's phase mix, as rgba16f, in a `StorageArrayTexture` per grid: ~40 layers × 512² × 8 B ≈ 84 MB for the core, half as many layers for the surround (256² on small GPUs).
+     - Rendering interpolates between snapshots along the cycle's growth curve. Most growth happens while drying (Stratmann), so the crust visibly grows each afternoon.
+     - The crust tops are isochrons: the bands seen in crack walls and flake edges.
+   - **Nucleation events:**
+     - An append buffer (atomic counter) of clusters: position, t₀, phase, size limit, growth rate, orientation seed.
+     - A cluster is emitted with probability ∝ deposited volume × supersaturation. Green-rust clusters also record their conversion time.
+     - ~100k clusters × 32 B. Petals and needles are expanded per cluster at draw time.
+   - **Debug views (`fieldView`):** pH, Cl⁻, Fe²⁺, currents, φ, phase, wet mask and thickness, in false color over the surface. Use them to check the Evans ring, the pits under the drop, the alkaline fringe and the microdroplets before any SEM look.
+
+6. **Surface (`RustSurface.ts`, `RustCracks.ts`)**
+   - **Height-field mesh:** camera-fitted, one vertex per detail texel near the view, at the higher of steel and crust.
+     - Steel: scratches, etched grain facets, pearlite relief, pits, MnS trenches.
+     - Crust micro-relief by phase: botryoidal gel (ferrihydrite), "sandy" grains (magnetite, fine lepidocrocite), lumps of 1–10 µm (ref 1).
+     - Cracks are carved in, with curled edges that read bright.
+   - **Cracks:**
+     - Pattern by hierarchical successive division (Bohn, Pauchard & Couder 2005): later cracks meet earlier ones at right angles (T-junctions).
+     - Segments are made per seed on the CPU, then turned into a distance field by jump flooding (2048²).
+     - Each segment opens when crust thickness × drying strain passes a threshold during a drying stage. Width is ε·h.
+     - Flakes exfoliate in akaganeite-rich patches.
+   - **Inner structure** (guided by the Maxon cross-sections; no section shot): crack walls, flake edges and broken tubercle caps rebuild their column from the snapshots:
+     - steel with its grains, and the voids of pits;
+     - one band per cycle, with phase by depth: magnetite and akaganeite at the steel, goethite inside, lepidocrocite outside;
+     - delamination cracks parallel to the surface, and voids.
+   - **Debug slice** (`fieldView: 'Section'`, not in the film): a vertical cut through the bake, to compare its layers with the reference cross-sections (bands, cracks along the layers, tongues into the steel).
+   - **Wide view:** outside the core, the surface reads the surround grid, blended across a margin. Crystals there are under a pixel and show as the statistical relief.
+
+7. **Crystals (`RustCrystals.ts`)**
+   - **Growth:** instanced habits read straight from the event buffer, no readback. Size is zero before t₀ and then grows, surface-limited, until it saturates. Crystals are buried as the crust rises.
+   - **Habits:**
+     - lepidocrocite rosettes: 20–60 curved, lobed plates (1–4 µm across, 20–60 nm thick) radiating from a nucleus and crossing each other;
+     - goethite cotton balls (globules of fine needles: a fuzzy shell plus ribbons) and crystalline needle flowers (5–10 µm);
+     - akaganeite spindles (0.2–1 µm) in clusters;
+     - magnetite octahedra (0.2–2 µm), truncated, with growth terraces;
+     - green-rust hexagons (0.4–2 µm), which crinkle into lepidocrocite or dissolve;
+     - NaCl cubes, hoppers (stepped skeletal faces) and right-angle dendrites; a deliquescing cube rounds off into its drop.
+   - **Culling:** a compute pass each frame culls by frustum and projected size and writes indirect draws (`IndirectStorageBufferAttribute` and `BufferGeometry.setIndirect`, both in r187). Under ~1.5 px, a crystal fades out by area into the crust's statistical relief, conserving energy as Feather's fibers and Fold's stars do.
+   - **Thin plates and needles:** analytic thickness (the beam passes through them and they glow), rims, and a sub-pixel width clamp with coverage scaled down.
+
+8. **Drops**
+   - Caps as displaced discs for the hero and the small drops, and instanced caps for the microdroplets.
+   - ESEM water: smooth and low-yield, with a brighter rim. Thin parts are translucent: signal from below × $e^{-h/\lambda}$, λ ≈ R/3.
+
+9. **SEM signal (`SemSignal.ts`, in every material)**
+   - Materials output a detector signal, not lit color. With θ the angle between the beam and the normal:
+
+     $$S = g\,[w_{SE}\,\delta_0\sec^n\theta\,(1 + E_{edge} + E_{thin})\,(1 - s_{det}(1 - V_{det}))\,C_{cav} + w_{BSE}\,\eta(\bar Z,\theta)\,(1 - s_{bse}(1 - V_{det}))]$$
+   - **Edge and thin terms:**
+     - height field: convexity at the interaction range ($h - \bar h_R$, a few taps), plus the analytic curvature of the noise;
+     - crystals: distance to the rim or edge, compared with R;
+     - thin features: $e^{-t/R}$.
+   - **Detector visibility $V_{det}$:** a height-field march toward the detector (like Fold's key light), plus a shadow map from the detector's direction for the crystals (`shadow()` of a `DirectionalLight`). $s_{det}$ is ~0.4 for the ETD with positive bias, ~0.1 in-lens, ~0.9 for a single BSE segment.
+   - **Cavity $C_{cav}$:** height-field obscurance from R to ~5 µm, plus `GTAONode` for the crystals, so pits and cracks go black.
+   - **`detector`:** `SE (ETD)` (default), `SE (in-lens)`, `BSE`, `Mix`. `beamEnergy` (kV) sets R and the SE/BSE balance.
+   - **`colorMode`:**
+     - `False color` (default): per-material gradient maps on the signal (rust tan to cream, steel blue-grey, salt cyan-white, water deep blue, cooler highlights), calibrated against colors sampled from refs 1 and 4.
+     - `Gray`: the authentic SE image.
+     - `Duotone`: blue against orange (ref 2).
+
+10. **SEM image (`SemImage.ts` effects, before `TimelineFade`)**
+    - Gain, offset and gamma (brightness and contrast).
+    - Beam blur, sub-pixel except at the top magnification.
+    - **Shot noise per scan frame:** √N for N₀ electrons per pixel, set by scan speed: TV rate while the stage moves, slow scan when it is still. Seeded by the timeline frame, so capture subframes keep the same noise. Also mains jitter of the lines, and lower contrast while wet (the gas skirt).
+    - **Slow-scan reveal** after each stage move: the new image builds line by line over the old one. The old frame is redrawn at the time of the move, so capture stays deterministic.
+    - **Data bar** (`dataBar`, off by default; generic, no vendor layout): detector, kV, WD, HFW, a scale bar from the camera, exposure time and RH. It is a canvas texture composited in the effect, so captures include it when it is on.
+    - Optional charging on dry salt (flare, streaks).
+    - Fades to black (beam blank) at both ends of the loop.
+
+11. **Stage (`RustStage.ts`) & capture**
+    - **Camera:** perspective at a virtual working distance of 10 mm (10,000 units), with FOV = HFW/WD (0.1°–14°): effectively parallel at high magnification, a little perspective at the widest, as in a real SEM. Tilt 0–55°, scan rotation and pan. Magnification ×50–×5,000 (HFW 2.5 mm–25 µm against a 127 mm reference width), eased; noisy while moving, then a slow scan.
+    - **`stageMode`:** `Session` (default), `Surface` (the wide view), `Overview` (the hero's drop), `Drop edge`, `Rosettes`, `Free`.
+    - **Session** (~180 s):
+      1. Beam on at ×200: polished steel, the hero crystal and the particles scattered around it.
+      2. RH rises: an adsorbed film; the cube rounds and becomes a drop; the microdroplet halo; pits at MnS under the drop.
+      3. The first cycles at ×1,000 on the drop's edge: the brown fringe, green-rust hexagons by the pits, drying with the edge pinned, efflorescence (cubes, hoppers, dendrites), the first cracks.
+      4. Weeks at ×3,000–5,000 over the ring: rosettes, cotton balls, akaganeite in the salty pocket, tubercle caps.
+      5. Out to the surface at ×50–×100: the hero's ring among its neighbours' rings, meeting and merging; rust rivers along the scratches (ref 4); fresh salt on dry days.
+      6. Slowly back in over the hero's crust, then fade to black and a new seed.
+    - **Capture:**
+      - The beam cone is the lens (`getCaptureLens`: `blades: 0`, radius α·WD, focus at the working distance).
+      - Defaults `{samples: 32, shutter: 0, settle: 0, preroll: 0}`.
+      - Capture waits for the bake: a new optional `CapturePrepare` hook in `Capture.ts`, awaited before the first frame.
+
+12. **Budget (desktop)**
+    - Bake: ~2–4 ms a step for both grids, ~4k steps, finished within the first ~1.5 min of playback.
+    - Frame:
+      - ~1M surface vertices;
+      - ≤ ~2M crystal triangles after culling;
+      - the SEM terms computed in-material;
+      - `GTAONode` + `SemImage` + fade.
+
+      Target 60 fps at 1080p.
+    - Memory: ~130 MB of snapshots (core and surround), ~5 MB of events.
+
+### Todo Breakdown
+
+- [x] **1. Research & plan (`rust-plan`):** Morphology, electrochemistry, secondary spreading and SEM image formation, from the sources above, and this plan.
+- [ ] **2. Phase 1 — Science bake & field views (`rust-phase1-bake`):**
+  - Build: the clock and climate (`exposureDays`, `secondsPerDay`); the steel microstructure; the salt scatter, daily deposition, hygroscopics, drops and coalescence; multigrid on the two nested grids; electrochemistry, transport, precipitation and phase rules; snapshots and events; `fieldView` and the debug slice on a flat-shaded height field. Enable `Rust` in `IoCodevember.ts`.
+  - Unit tests: Faraday, Stumm–Lee half-lives, $i_{\lim}$, hysteresis, molar volumes, the clock.
+  - Headless checks: bake determinism, no NaN, the Evans pattern.
+- [ ] **3. Phase 2 — Surface & SEM image (`rust-phase2-surface-sem`):**
+  - The steel and crust height-field surface with phase micro-relief.
+  - `SemSignal`: secant SE, edge and thin terms, BSE Z̄, the detector march and shadow map, the cavity term, detector modes, `beamEnergy`.
+  - `SemImage`: noise, scan, reveal, the optional data bar.
+  - The stage camera in `Surface`, `Overview` and `Free`.
+- [ ] **4. Phase 3 — Crystals, cracks, drops (`rust-phase3-crystals`):**
+  - Habits from the events, with growth laws and burial.
+  - GPU culling, LOD and indirect draws.
+  - Cracks by successive division, jump flooding and opening times; exfoliation; tubercle caps.
+  - Drops and microdroplets.
+- [ ] **5. Phase 4 — Session & capture (`rust-phase4-session-capture`):**
+  - Crack walls and flake edges showing the inner bands.
+  - The `Session` choreography with slow-scan reveals, and the loop's fade and new seed.
+  - Color modes calibrated against the refs.
+  - Capture: the `CapturePrepare` hook and the round beam aperture.
+  - Headless frames side by side with the refs, `pnpm typecheck` / `lint:check` / `test` / `build`.
+
+### Verification
+
+- **Unit tests:**
+  - Faraday (1 A/m² = 1.16 mm/yr).
+  - Stumm–Lee half-life (4.1 min at pH 7).
+  - $i_{\lim}$(10 µm) = 1.9 mA/cm².
+  - Hygroscopic volume and hysteresis.
+  - Molar-volume ratios.
+  - Reuter η (steel 0.28).
+  - Kanaya–Okayama (1.0 µm in Fe at 15 kV).
+  - The clock is monotonic and its day boundaries are right.
+  - Crack T-junction share > 50%.
+- **Headless WebGPU** (few runs):
+  - Two bakes give identical snapshots; no NaN or Inf (readback scan).
+  - The multigrid matches an analytic Poisson case.
+  - The Evans pattern: anodes and pits under the drop, the alkaline cathodic fringe, the ring at the boundary.
+  - SEM-look statistics against ref 3: histogram, edge-to-flat ratio, black cavities.
+  - The debug slice against the Maxon cross-sections: a band per cycle, cracks along the layers, voids, tongues into the steel.
+
+### Locked Decisions
+
+1. **Look:** false color by default; `Gray` (the authentic SE image) and `Duotone` as modes.
+2. **Story:** one large salt crystal, not isolated: smaller particles scattered around it, and a view that widens to the surrounding surface.
+3. **Span and pacing:** 30 days at ~5 s a day by default, both adjustable (`exposureDays`, `secondsPerDay`).
+4. **Data bar:** optional (`dataBar`, off by default).
+5. **Cross-section:** no section shot. The Maxon cross-sections only guide the crust's inner structure (crack walls, flake edges) and the debug slice.
+6. **Loop:** fade to black and a new seed each loop, as in Fold.
+7. **Sound:** silent for now.
+
+### Sources
+
+- **Electrochemistry and droplets:**
+  - Frontiers in Chemistry 2021, microdroplets on iron (see Research)
+  - Tsuru, Tamiya & Nishikata, Electrochim. Acta 49 (2004) 2709, doi 10.1016/j.electacta.2004.01.032
+  - Li & Hihara, J. Electrochem. Soc. 2012, doi 10.1149/2.013204jes (in-situ Raman of NaCl particles)
+  - Li & Hihara 2016 (critical drop size; as cited in Frontiers 2021)
+  - Stratmann & Müller, Corros. Sci. 36 (1994) 327
+  - Stumm & Lee, Ind. Eng. Chem. 53 (1961) 143
+  - Muto, Chiba et al. on MnS trenches ([ECS abstract](https://ecs.confex.com/ecs/232/webprogram/Paper102073.html))
+- **Rust phases and morphology:**
+  - Morcillo et al., Corrosion 2015, doi 10.5006/1672 (akaganeite conditions); the same group's 2016 SEM/micro-Raman work on marine rust morphologies
+  - Raman et al., Corrosion 42 (1986) 447
+  - Antunes & Costa (IPEN, PDF linked above; goethite cotton balls and pointed flowers, magnetite plates; Philips XL30, 20 kV SE)
+  - Costa et al., Heliyon 2019 (sizes and rates)
+  - Cornell & Schwertmann, *The Iron Oxides* (2003)
+- **SEM image formation:**
+  - Goldstein et al. 2018
+  - Cazaux 2002 (secant law)
+  - Kanaya & Okayama, J. Phys. D 5 (1972) 43
+  - Reuter's η fit (via Goldstein)
+- **Standards and cracks:**
+  - ISO 9223:2012
+  - Bohn, Pauchard & Couder, Phys. Rev. E 71 (2005) (successive division)
+- **Maxon CRS page and its EAG cross-sections** (see References).
 
 ## 12. Feather
 

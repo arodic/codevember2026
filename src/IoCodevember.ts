@@ -84,7 +84,7 @@ const DOCUMENTS: Record<string, () => Promise<Document>> = {
   // Tesseract: () => import('./days/Tesseract.js').then(module => new module.Tesseract()),
   // Membrane: () => import('./days/Membrane.js').then(module => new module.Membrane()),
   // Caustic: () => import('./days/Caustic.js').then(module => new module.Caustic()),
-  // Rust: () => import('./days/Rust.js').then(module => new module.Rust()),
+  Rust: () => import('./days/Rust.js').then(module => new module.Rust()),
   Feather: () => import('./days/Feather.js').then(module => new module.Feather()),
   // Labyrinth: () => import('./days/Labyrinth.js').then(module => new module.Labyrinth()),
   // Tension: () => import('./days/Tension.js').then(module => new module.Tension()),
