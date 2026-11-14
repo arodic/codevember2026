@@ -4,10 +4,8 @@ import {
 } from './RustScience.js'
 import type { RustClock } from './RustClock.js'
 
-/** Side (µm) of the whole specimen surface simulated (the surround grid), centred on the hero crystal. */
-export const SURROUND_SIZE = 2560
-/** Side (µm) of the finely simulated core around the hero crystal. */
-export const CORE_SIZE = 640
+/** Side (µm) of the simulated tile of specimen surface, centred on the hero crystal; it repeats (periodic). */
+export const TILE_SIZE = 640
 /** Contact angles of NaCl brine on polished steel: advancing, and receding (below which a pinned drop lets go). */
 export const ADVANCING_ANGLE = 45 * Math.PI / 180
 export const RECEDING_ANGLE = 10 * Math.PI / 180
@@ -67,6 +65,21 @@ export interface SaltField {
   micro: Microdroplet[]
 }
 
+/** The shortest of the periodic images of an offset `d` (µm) along one axis of the tile. */
+export function nearestOffset(d: number) {
+  return d - TILE_SIZE * Math.round(d / TILE_SIZE)
+}
+
+/** `x` (µm) wrapped onto the tile, `[−TILE_SIZE/2, TILE_SIZE/2)`. */
+export function wrapTile(x: number) {
+  return x - TILE_SIZE * Math.floor(x / TILE_SIZE + 0.5)
+}
+
+/** Distance (µm) between two points of the tile, through the nearest of their periodic images. */
+export function tileDistance(ax: number, az: number, bx: number, bz: number) {
+  return Math.hypot(nearestOffset(ax - bx), nearestOffset(az - bz))
+}
+
 /** Base radius (µm) of a drop of `edge` µm of NaCl at `rh` resting at the advancing angle. */
 function restingRadius(edge: number, rh: number) {
   return capBaseRadius(dropVolume(saltCubeMass(edge), rh), ADVANCING_ANGLE)
@@ -78,41 +91,32 @@ function smallEdge(random: () => number) {
 }
 
 /**
- * The salt on the specimen for a seed: the hero crystal near the centre, one neighbour within the core (their rings
- * meet), three more out in the surround, a scatter of small crystals at the start (`saltLoad`), and small crystals
- * landing through each day (`chlorideDeposition`). Around each large deposit, the microdroplets its secondary-spreading
- * film will condense, smaller the farther out (Frontiers in Chemistry 2021), placed without overlaps.
+ * The salt on the tile for a seed: the hero crystal near the centre, one neighbour 200–260 µm off (their rings meet),
+ * a scatter of small crystals at the start (`saltLoad`), and small crystals landing through each day
+ * (`chlorideDeposition`). Around each large deposit, the microdroplets its secondary-spreading film will condense,
+ * smaller the farther out (Frontiers in Chemistry 2021), placed without overlaps. Everything lies on the periodic tile
+ * (positions wrapped onto it, distances through the nearest image), so the tile repeats seamlessly.
  */
 export function generateSalt(options: SaltOptions): SaltField {
   const random = createRandom(options.seed * 4271 + 3)
-  const half = SURROUND_SIZE / 2
+  const half = TILE_SIZE / 2
   const large: SaltDeposit[] = [{x: (random() - 0.5) * 20, z: (random() - 0.5) * 20, edge: options.heroEdge, time: -1}]
-  const coreAngle = random() * Math.PI * 2
-  const coreDistance = 200 + 60 * random()
+  const angle = random() * Math.PI * 2
+  const distance = 200 + 60 * random()
   large.push({
-    x: large[0].x + Math.cos(coreAngle) * coreDistance, z: large[0].z + Math.sin(coreAngle) * coreDistance,
+    x: wrapTile(large[0].x + Math.cos(angle) * distance), z: wrapTile(large[0].z + Math.sin(angle) * distance),
     edge: 18 + 4 * random(), time: -1,
   })
-  for (let n = 0, attempts = 0; n < 3 && attempts < 400; attempts++) {
-    const angle = random() * Math.PI * 2
-    const distance = 620 + 480 * random()
-    const x = Math.cos(angle) * distance
-    const z = Math.sin(angle) * distance
-    if (Math.abs(x) > half - 200 || Math.abs(z) > half - 200) continue
-    if (large.some(d => Math.hypot(d.x - x, d.z - z) < 380)) continue
-    large.push({x, z, edge: 15 + 10 * random(), time: -1})
-    n++
-  }
 
   const footprints = large.map(d => restingRadius(d.edge, 0.97) + 10)
-  const area = (SURROUND_SIZE * 1e-4) ** 2
+  const area = (TILE_SIZE * 1e-4) ** 2
   const small: SaltDeposit[] = []
   const scatter = (micrograms: number, time: (random: () => number) => number, avoidLarge: boolean) => {
     let mass = 0
     for (let attempts = 0; mass < micrograms * 1e-6 && attempts < 400000; attempts++) {
-      const x = (random() * 2 - 1) * (half - 8)
-      const z = (random() * 2 - 1) * (half - 8)
-      if (avoidLarge && large.some((d, i) => Math.hypot(d.x - x, d.z - z) < footprints[i])) continue
+      const x = (random() * 2 - 1) * half
+      const z = (random() * 2 - 1) * half
+      if (avoidLarge && large.some((d, i) => tileDistance(d.x, d.z, x, z) < footprints[i])) continue
       const edge = smallEdge(random)
       small.push({x, z, edge, time: time(random)})
       mass += saltCubeMass(edge)
@@ -137,9 +141,9 @@ export function generateSalt(options: SaltOptions): SaltField {
       const angle = random() * Math.PI * 2
       const radius = 7 * Math.pow(1 - distance / reach, 1.5) + 0.6
       const r = edgeRadius + 2 + distance + radius
-      const x = deposit.x + Math.cos(angle) * r
-      const z = deposit.z + Math.sin(angle) * r
-      if (own.some(m => Math.hypot(m.x - x, m.z - z) < m.radius + radius + 1)) continue
+      const x = wrapTile(deposit.x + Math.cos(angle) * r)
+      const z = wrapTile(deposit.z + Math.sin(angle) * r)
+      if (own.some(m => tileDistance(m.x, m.z, x, z) < m.radius + radius + 1)) continue
       own.push({x, z, radius, distance, parent})
     }
     micro.push(...own)
@@ -180,7 +184,8 @@ const LARGE_FIELDS = 6
 /**
  * The drops through the exposure, sampled every `DROP_STEP` from the clock's humidity: each large drop's volume follows
  * its salt's hygroscopic growth, it spreads at the advancing contact angle, stays pinned while it shrinks until the
- * receding angle, and then lets go; drops whose footprints touch coalesce (mass-weighted centre, salt summed). Above
+ * receding angle, and then lets go; drops whose footprints touch (on the periodic tile) coalesce (mass-weighted
+ * centre, salt summed). Above
  * the critical size a drop's secondary-spreading film creeps out with the time it has been wet. Small drops scale with
  * their crystal's edge, so one unit drop stands for all of them. Deterministic per seed, sampled once.
  */
@@ -266,11 +271,12 @@ export class DropModel {
         for (let j = i + 1; j < drops.length; j++) {
           const b = drops[j]
           if (b.merged >= 0 || b.radius <= 0) continue
-          if (Math.hypot(a.x - b.x, a.z - b.z) >= a.radius + b.radius) continue
+          if (tileDistance(a.x, a.z, b.x, b.z) >= a.radius + b.radius) continue
           const [keep, gone] = a.mass >= b.mass ? [a, b] : [b, a]
           const total = keep.mass + gone.mass
-          keep.x = (keep.x * keep.mass + gone.x * gone.mass) / total
-          keep.z = (keep.z * keep.mass + gone.z * gone.mass) / total
+          // the mass-weighted centre, through the nearest image of the one that goes
+          keep.x = wrapTile(keep.x + nearestOffset(gone.x - keep.x) * gone.mass / total)
+          keep.z = wrapTile(keep.z + nearestOffset(gone.z - keep.z) * gone.mass / total)
           keep.mass = total
           keep.pinned = Math.max(keep.pinned, gone.pinned)
           keep.wetTime = Math.max(keep.wetTime, gone.wetTime)

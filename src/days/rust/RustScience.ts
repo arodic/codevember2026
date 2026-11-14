@@ -93,14 +93,22 @@ export const FERROUS_HYDROXIDE_KSP = 4.87e-17
 /** First hydrolysis constant of Fe²⁺ (Fe²⁺ + H₂O ⇌ FeOH⁺ + H⁺): what acidifies a pit to pH ~5. */
 export const FERROUS_HYDROLYSIS = 10 ** -9.5
 
+/** The air's CO₂ in a film: [HCO₃⁻] = c₁/[H⁺], [CO₃²⁻] = c₂/[H⁺]² (M², M³; K_H·pCO₂ at 420 ppm, K₁ and K₂ at 25 °C). */
+export const CARBONATE_HCO3 = 10 ** -1.47 * 4.2e-4 * 10 ** -6.35
+export const CARBONATE_CO3 = CARBONATE_HCO3 * 10 ** -10.33
+
 /**
- * pH of a film with `alkalinity` (M of OH⁻ less H⁺ from the electrode reactions) and `ferrous` (M of Fe²⁺), whose
- * hydrolysis adds acid.
+ * pH of a film in air with `alkalinity` (M of acid it can neutralize: OH⁻ and carbonate less H⁺, from the electrode
+ * reactions; taking up CO₂ leaves it as it is) and `ferrous` (M of Fe²⁺, whose hydrolysis adds acid), its carbonate in
+ * equilibrium with the air: pure water sits at 5.6, bicarbonate near 8, an alkali film buffers at 10–11.
  */
 export function filmPH(alkalinity: number, ferrous: number) {
   const effective = alkalinity - Math.sqrt(FERROUS_HYDROLYSIS * Math.max(ferrous, 0))
-  const hydroxide = 0.5 * (effective + Math.sqrt(effective * effective + 4e-14))
-  return 14 + Math.log10(Math.max(hydroxide, 1e-14))
+  const c1 = CARBONATE_HCO3 + 1e-14
+  // HCO₃⁻ and CO₃²⁻ carry it: 2c₂x² + c₁x = A for x = 1/[H⁺]
+  if (effective > 1e-4) return Math.log10(2 * effective / (c1 + Math.sqrt(c1 * c1 + 8 * CARBONATE_CO3 * effective)))
+  // HCO₃⁻ and OH⁻ against H⁺: y − c₁/y = A for y = c₁/[H⁺]
+  return Math.log10(0.5 * (effective + Math.sqrt(effective * effective + 4 * c1)) / c1)
 }
 
 /** O₂ diffusivity in water (m²/s) and its solubility under air (mol/m³, 25 °C, fresh water). */

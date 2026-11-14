@@ -3,16 +3,16 @@ import {
 } from 'three/webgpu'
 import type { Node, StorageBufferNode } from 'three/webgpu'
 import {
-  Discard, Fn, If, Loop, abs, clamp, cross, dFdx, dFdy, dot, float, instanceIndex, int, log, max, mix, normalize,
+  Fn, If, Loop, abs, clamp, cross, dFdx, dFdy, dot, float, instanceIndex, int, log, max, mix, normalize,
   positionGeometry, positionPrevious, positionWorld, select, smoothstep, storage, uniform, unpackHalf2x16,
   varying, vec2, vec3, vec4, vertexIndex,
 } from 'three/tsl'
 import { EVENT_CAPACITY, RustBake } from './RustChemistry.js'
 import { steelSample } from './RustSteel.js'
 
-/** What the Phase 1 surface shows: the simulated fields, the steel, the rust from the snapshots, the debug section. */
+/** What the stage shows: the SEM image of the volume, or debug maps of the bake (fields, steel, rust, section). */
 export const RUST_FIELD_VIEWS = [
-  'Surface', 'Steel', 'Electrolyte', 'pH', 'Chloride', 'Iron(II)', 'Anodic', 'Cathodic', 'Potential', 'Oxygen',
+  'SEM', 'Steel', 'Electrolyte', 'pH', 'Chloride', 'Iron(II)', 'Anodic', 'Cathodic', 'Potential', 'Oxygen',
   'Rust', 'Phases', 'Iron lost', 'Nucleation', 'Section',
 ] as const
 export type RustFieldView = typeof RUST_FIELD_VIEWS[number]
@@ -42,7 +42,7 @@ function log10(x: Node<'float'>) {
 /** Uniforms choosing what and when the surface shows. */
 export type SurfaceUniforms = ReturnType<typeof createSurfaceUniforms>
 
-type Snapshots = StorageBufferNode<'uvec2'>
+export type Snapshots = StorageBufferNode<'uvec2'>
 
 function clampInt(v: Node<'int'>, lo: number, hi: number) {
   return select(v.lessThan(lo), int(lo), select(v.greaterThan(hi), int(hi), v))
@@ -71,12 +71,11 @@ function readSnapshot(bake: RustBake, snapshots: Snapshots, layer: Node<'int'>, 
 
 /** The snapshot texel index of cell `(x, y)` of a bake. */
 function snapshotTexel(bake: RustBake, x: Node<'int'>, y: Node<'int'>) {
-  const ds = bake.grid.snapshotDownsample
-  return y.div(ds).mul(bake.snapshotSize).add(x.div(ds))
+  return y.mul(bake.snapshotSize).add(x)
 }
 
 /** The snapshot blend of cell `(x, y)` at the surface's display time: iron lost, crust and phase mix. */
-function blendedSnapshot(bake: RustBake, snapshots: Snapshots, s: SurfaceUniforms, x: Node<'int'>, y: Node<'int'>) {
+export function blendedSnapshot(bake: RustBake, snapshots: Snapshots, s: SurfaceUniforms, x: Node<'int'>, y: Node<'int'>) {
   const t = snapshotTexel(bake, x, y)
   const a = readSnapshot(bake, snapshots, int(s.layerA), t)
   const b = readSnapshot(bake, snapshots, int(s.layerB), t)
@@ -94,17 +93,24 @@ function phaseColor(phases: Node<'vec4'>) {
 }
 
 /**
- * The specimen surface of one bake grid in Phase 1: a height field with one vertex per cell, the steel at minus the
- * iron lost and the crust on top of it (from the snapshots at the display time, `relief`× exaggerated), flat-shaded,
- * colored by `view`: the steel's microstructure, the live fields of the bake, or the rust. `clipHalf` > 0 cuts out a
- * square around the origin (where a finer grid draws).
+ * The debug map of the tile: a height field with one vertex per cell, the steel at minus the iron lost and the crust
+ * on top of it (from the snapshots at the display time, `relief`× exaggerated), flat-shaded, colored by `view`: the
+ * live fields of the bake, or the rust. Diagnostics only: the specimen itself is drawn by the SEM volume.
  */
 export class RustSurface extends Mesh<BufferGeometry, MeshBasicNodeMaterial> {
 
-  /** Half-side (µm) of the square around the origin this surface leaves to a finer grid (0 = none). */
-  readonly clipHalf = uniform(0)
+  /** Whether this mesh owns its geometry and material (a copy shares its source's). */
+  private readonly owner: boolean
 
-  constructor(bake: RustBake, s: SurfaceUniforms, steel: {seed: Node<'float'>; pearlite: Node<'float'>; inclusions: Node<'float'>}) {
+  constructor(bake: RustBake, s: SurfaceUniforms, steel: {seed: Node<'float'>; pearlite: Node<'float'>; inclusions: Node<'float'>},
+    source?: RustSurface) {
+    if (source) {
+      super(source.geometry, source.material)
+      this.owner = false
+      this.name = 'RustSurface copy'
+      this.frustumCulled = false
+      return
+    }
     const n = bake.grid.resolution
     const geometry = new BufferGeometry()
     geometry.setAttribute('position', new BufferAttribute(new Float32Array(n * n * 3), 3))
@@ -120,7 +126,8 @@ export class RustSurface extends Mesh<BufferGeometry, MeshBasicNodeMaterial> {
     geometry.setIndex(new BufferAttribute(index, 1))
     const material = new MeshBasicNodeMaterial()
     super(geometry, material)
-    this.name = `RustSurface ${bake.grid.name}`
+    this.owner = true
+    this.name = 'RustSurface'
     this.frustumCulled = false
     material.name = this.name
     material.side = DoubleSide
@@ -129,8 +136,8 @@ export class RustSurface extends Mesh<BufferGeometry, MeshBasicNodeMaterial> {
     const electro = storage(bake.electro, 'vec4', bake.cells).toReadOnly()
     const species = storage(bake.species, 'vec4', bake.cells).toReadOnly()
     const chem = storage(bake.chem, 'vec4', bake.cells).toReadOnly()
-    const vColor = varying(vec3(), `vRustColor${bake.grid.name}`)
-    const vWorld = varying(vec3(), `vRustWorld${bake.grid.name}`)
+    const vColor = varying(vec3(), 'vRustColor')
+    const vWorld = varying(vec3(), 'vRustWorld')
 
     material.positionNode = Fn(() => {
       const i = int(vertexIndex)
@@ -193,11 +200,7 @@ export class RustSurface extends Mesh<BufferGeometry, MeshBasicNodeMaterial> {
       return position
     })()
 
-    const clipHalf = this.clipHalf
     material.colorNode = Fn(() => {
-      If(clipHalf.greaterThan(0).and(abs(vWorld.x).lessThan(clipHalf)).and(abs(vWorld.z).lessThan(clipHalf)), () => {
-        Discard()
-      })
       const normal = normalize(cross(dFdx(positionWorld), dFdy(positionWorld)))
       const shade = abs(dot(normal, normalize(vec3(-0.45, 1, 0.3)))).mul(0.6).add(0.4)
       const grain = steelSample(vWorld.xz, steel.seed, steel.pearlite, steel.inclusions)
@@ -209,6 +212,7 @@ export class RustSurface extends Mesh<BufferGeometry, MeshBasicNodeMaterial> {
   }
 
   override dispose() {
+    if (!this.owner) return
     this.geometry.dispose()
     this.material.dispose()
   }
@@ -226,14 +230,14 @@ export class RustEvents extends Mesh<InstancedBufferGeometry, MeshBasicNodeMater
     geometry.instanceCount = EVENT_CAPACITY
     const material = new MeshBasicNodeMaterial()
     super(geometry, material)
-    this.name = `RustEvents ${bake.grid.name}`
+    this.name = 'RustEvents'
     this.frustumCulled = false
     material.name = this.name
     material.side = DoubleSide
 
     const events = storage(bake.events, 'vec4', EVENT_CAPACITY).toReadOnly()
     const snapshots = storage(bake.snapshots, 'uvec2', bake.snapshotCount * bake.snapshotSize * bake.snapshotSize).toReadOnly()
-    const vColor = varying(vec3(), `vRustEvent${bake.grid.name}`)
+    const vColor = varying(vec3(), 'vRustEvent')
     const palette = [PHASE_COLORS.other, PHASE_COLORS.lepidocrocite, PHASE_COLORS.goethite, PHASE_COLORS.akaganeite, linear(0x6fa8ff)]
     const n = bake.grid.resolution
 
@@ -278,7 +282,7 @@ export class RustSection extends Mesh<BufferGeometry, MeshBasicNodeMaterial> {
     geometry.setIndex([0, 1, 2, 0, 2, 3])
     const material = new MeshBasicNodeMaterial()
     super(geometry, material)
-    this.name = `RustSection ${bake.grid.name}`
+    this.name = 'RustSection'
     this.frustumCulled = false
     material.name = this.name
     material.side = DoubleSide
@@ -287,7 +291,7 @@ export class RustSection extends Mesh<BufferGeometry, MeshBasicNodeMaterial> {
     const depth = 40
     const height = 80
     const exaggeration = this.exaggeration
-    const vLocal = varying(vec2(), `vRustSection${bake.grid.name}`)
+    const vLocal = varying(vec2(), 'vRustSection')
     const n = bake.grid.resolution
     material.positionNode = Fn(() => {
       const X = positionGeometry.x.mul(bake.grid.size).add(bake.originX)

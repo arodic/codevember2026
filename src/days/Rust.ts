@@ -6,16 +6,18 @@ import { registerEditor } from '@io-gui/editors'
 import { ioNumberSlider } from '@io-gui/sliders'
 import { ioOptionSelect, Menu } from '@io-gui/menus'
 import { RustClock } from './rust/RustClock.js'
-import { CORE_SIZE, DropModel, DropState, MAX_LARGE_DROPS, SURROUND_SIZE, SaltField, generateSalt } from './rust/RustSalt.js'
+import { DropModel, DropState, MAX_LARGE_DROPS, SaltField, TILE_SIZE, generateSalt } from './rust/RustSalt.js'
 import { BakeData, BakeGrid, RustBake } from './rust/RustChemistry.js'
 import {
   LIVE_FIELD_VIEWS, RUST_FIELD_VIEWS, RustEvents, RustFieldView, RustSection, RustSurface, SurfaceUniforms,
   createSurfaceUniforms,
 } from './rust/RustSurface.js'
 import { pearliteShare } from './rust/RustSteel.js'
+import { MAX_TICK, RustVolume } from './rust/RustVolume.js'
+import { RustSEM } from './rust/RustSEM.js'
 import { SECONDS_PER_DAY } from './rust/RustScience.js'
 
-export const RUST_STAGE_MODES = ['Overview', 'Surface', 'Top'] as const
+export const RUST_STAGE_MODES = ['Overview', 'Close', 'Surface', 'Top'] as const
 export type RustStageMode = typeof RUST_STAGE_MODES[number]
 
 /** Virtual working distance (µm) of the SEM: the camera sits this far from what it looks at, with a field of view to match. */
@@ -23,27 +25,18 @@ const WORKING_DISTANCE = 10000
 /** Aspect of the frame the stage composes for. */
 const FRAME_ASPECT = 16 / 9
 
-const CORE_GRID: BakeGrid = {
-  name: 'core', size: CORE_SIZE, resolution: 512, centerX: 0, centerZ: 0, snapshotDownsample: 1, stepScale: 1,
-}
-const SURROUND_GRID: BakeGrid = {
-  name: 'surround', size: SURROUND_SIZE, resolution: 512, centerX: 0, centerZ: 0, snapshotDownsample: 2, stepScale: 2,
-}
+/** The periodic tile the bake runs on: 640 µm at 1.25 µm. */
+const TILE_GRID: BakeGrid = {size: TILE_SIZE, resolution: 512}
 
-/** The salt and microdroplets of `salt` that lie inside `grid`, packed for its bake. */
-function bakeData(salt: SaltField, grid: BakeGrid, snapshotCount: number): BakeData {
-  const half = grid.size / 2
-  const inside = (x: number, z: number, margin: number) =>
-    Math.abs(x - grid.centerX) < half - margin && Math.abs(z - grid.centerZ) < half - margin
+/** The salt and microdroplets of `salt` (all on the tile), packed for the bake. */
+function bakeData(salt: SaltField, snapshotCount: number): BakeData {
   const deposits: number[] = []
-  for (const d of salt.small) if (inside(d.x, d.z, d.edge)) deposits.push(d.x, d.z, d.edge, d.time)
-  salt.large.forEach(d => {
-    if (inside(d.x, d.z, d.edge)) deposits.push(d.x, d.z, -d.edge, d.time)
-  })
+  for (const d of salt.small) deposits.push(d.x, d.z, d.edge, d.time)
+  for (const d of salt.large) deposits.push(d.x, d.z, -d.edge, d.time)
   const micro: number[] = []
   const parents: number[] = []
   for (const m of salt.micro) {
-    if (m.parent >= MAX_LARGE_DROPS || !inside(m.x, m.z, m.radius * 3)) continue
+    if (m.parent >= MAX_LARGE_DROPS) continue
     micro.push(m.x, m.z, m.radius, m.distance)
     parents.push(m.parent)
   }
@@ -67,11 +60,11 @@ function packLarge(state: DropState) {
  * as an SEM would see it (`1 unit = 1 µm`). Phase 1: the science bake and its field views.
  *
  * The exposure clock maps the timeline onto ~30 days of marine humidity cycles (`exposureDays`, `secondsPerDay`). The
- * salt deliquesces into drops that grow, pin and dry with the humidity; a GPU bake on two grids (a 640 µm core at
- * 1.25 µm, a 2.56 mm surround at 5 µm) runs the thin-film electrochemistry ahead of the playhead (see `RustBake`),
- * writing snapshots of the rust and nucleation events. `fieldView` shows the steel, the live fields (the bake then
- * follows the playhead) or the rust from the snapshots on a flat-shaded height field; `Section` is a debug cut
- * through the core to compare with reference cross-sections.
+ * salt deliquesces into drops that grow, pin and dry with the humidity; a GPU bake on one periodic 640 µm tile at
+ * 1.25 µm (it repeats seamlessly, so the stage can show its neighbours) runs the thin-film electrochemistry ahead of
+ * the playhead (see `RustBake`), writing snapshots of the rust and nucleation events. `fieldView` shows the steel,
+ * the live fields (the bake then follows the playhead) or the rust from the snapshots on a flat-shaded height field;
+ * `Section` is a debug cut through the tile to compare with reference cross-sections.
  */
 @Register
 export class Rust extends Document {
@@ -79,7 +72,7 @@ export class Rust extends Document {
   @Property({type: String, value: 'Overview'})
   declare stageMode: RustStageMode
 
-  @Property({type: String, value: 'Surface'})
+  @Property({type: String, value: 'SEM'})
   declare fieldView: RustFieldView
 
   @Property({type: Number, value: 11})
@@ -117,8 +110,8 @@ export class Rust extends Document {
   @Property({type: Number, value: 1})
   declare relief: number
 
-  /** Bake steps per grid per frame. */
-  @Property({type: Number, value: 1})
+  /** Bake steps per frame (playback waits for the bake when it is behind). */
+  @Property({type: Number, value: 2})
   declare bakeSpeed: number
 
   /** How far the bake has come (0–1 of the exposure). */
@@ -129,15 +122,15 @@ export class Rust extends Document {
   private clock: RustClock
   private salt: SaltField | null = null
   private drops: DropModel | null = null
-  private core: RustBake | null = null
-  private surround: RustBake | null = null
-  private coreSurface: RustSurface | null = null
-  private surroundSurface: RustSurface | null = null
-  private coreEvents: RustEvents | null = null
-  private surroundEvents: RustEvents | null = null
+  private bake: RustBake | null = null
+  /** The rust grown in 3D from the bake, and the SEM view of it. */
+  private volume: RustVolume | null = null
+  private sem: RustSEM | null = null
+  /** The debug map of the tile and its eight neighbours (copies sharing it). */
+  private surfaces: RustSurface[] = []
+  private events: RustEvents | null = null
   private section: RustSection | null = null
-  private readonly coreUniforms: SurfaceUniforms = createSurfaceUniforms()
-  private readonly surroundUniforms: SurfaceUniforms = createSurfaceUniforms()
+  private readonly surfaceUniforms: SurfaceUniforms = createSurfaceUniforms()
   private readonly steelUniforms = {seed: uniform(11), pearlite: uniform(pearliteShare(0.1)), inclusions: uniform(1)}
   private bakeDirty = true
   private renderer: WebGPURenderer | null = null
@@ -188,8 +181,7 @@ export class Rust extends Document {
   }
 
   reliefChanged() {
-    this.coreUniforms.relief.value = this.relief
-    this.surroundUniforms.relief.value = this.relief
+    this.surfaceUniforms.relief.value = this.relief
     this.notify({kind: 'material'})
   }
 
@@ -216,10 +208,11 @@ export class Rust extends Document {
     const section = this.fieldView === 'Section'
     const mode = section ? 'Section' : this.stageMode
     const target = new Vector3(0, 0, 0)
-    let width = 760
+    let width = 480
     let tilt = 35
     let azimuth = 20
-    if (mode === 'Surface') { width = 2700; tilt = 30 }
+    if (mode === 'Close') { width = 110; tilt = 40; azimuth = 35; target.set(62, 2, 18) }
+    if (mode === 'Surface') { width = 1150; tilt = 30 }
     if (mode === 'Top') { width = 700; tilt = 0; azimuth = 0 }
     if (mode === 'Section') { width = 700; tilt = 90; azimuth = 0; target.set(0, 120, 0) }
     const t = tilt * Math.PI / 180
@@ -237,13 +230,12 @@ export class Rust extends Document {
 
   private syncView() {
     const view = RUST_FIELD_VIEWS.indexOf(this.fieldView)
-    for (const u of [this.coreUniforms, this.surroundUniforms]) {
-      u.view.value = Math.max(view, 0)
-      u.relief.value = this.relief
-    }
-    const nucleation = this.fieldView === 'Nucleation'
-    if (this.coreEvents) this.coreEvents.visible = nucleation
-    if (this.surroundEvents) this.surroundEvents.visible = nucleation
+    this.surfaceUniforms.view.value = Math.max(view, 0)
+    this.surfaceUniforms.relief.value = this.relief
+    if (this.events) this.events.visible = this.fieldView === 'Nucleation'
+    const sem = this.fieldView === 'SEM'
+    if (this.sem) this.sem.visible = sem
+    for (const surface of this.surfaces) surface.visible = !sem
     if (this.section) this.section.visible = this.fieldView === 'Section'
     this.notify({kind: 'material'})
   }
@@ -253,7 +245,7 @@ export class Rust extends Document {
     return LIVE_FIELD_VIEWS.includes(this.fieldView)
   }
 
-  /** The new salt, drops and bake grids of the current settings, and their meshes, cleared on the GPU. */
+  /** The new salt, drops and bake of the current settings, and their meshes, cleared on the GPU. */
   private rebuild(renderer: WebGPURenderer) {
     this.disposeBake()
     const salt = generateSalt({
@@ -263,42 +255,53 @@ export class Rust extends Document {
     this.salt = salt
     this.drops = new DropModel(this.clock, salt)
     const count = this.clock.snapshotTimes.length
-    this.core = new RustBake(CORE_GRID, bakeData(salt, CORE_GRID, count))
-    this.surround = new RustBake(SURROUND_GRID, bakeData(salt, SURROUND_GRID, count))
+    const bake = new RustBake(TILE_GRID, bakeData(salt, count))
+    this.bake = bake
     const pearlite = pearliteShare(this.carbon)
     this.steelUniforms.seed.value = this.seed
     this.steelUniforms.pearlite.value = pearlite
     this.steelUniforms.inclusions.value = this.inclusions
-    for (const bake of [this.core, this.surround]) bake.reset(renderer, this.seed, pearlite, this.inclusions)
+    bake.reset(renderer, this.seed, pearlite, this.inclusions)
+    this.volume = new RustVolume(bake)
+    this.volume.reset(renderer, this.seed)
 
-    this.coreSurface = new RustSurface(this.core, this.coreUniforms, this.steelUniforms)
-    this.surroundSurface = new RustSurface(this.surround, this.surroundUniforms, this.steelUniforms)
-    this.surroundSurface.clipHalf.value = CORE_SIZE / 2
-    this.coreEvents = new RustEvents(this.core, this.coreUniforms)
-    this.surroundEvents = new RustEvents(this.surround, this.surroundUniforms)
-    this.section = new RustSection(this.core, this.coreUniforms, 0)
-    this.scene.add(this.surroundSurface, this.coreSurface, this.coreEvents, this.surroundEvents, this.section)
+    const surface = new RustSurface(bake, this.surfaceUniforms, this.steelUniforms)
+    this.surfaces = [surface]
+    for (let dz = -1; dz <= 1; dz++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        if (dx === 0 && dz === 0) continue
+        const copy = new RustSurface(bake, this.surfaceUniforms, this.steelUniforms, surface)
+        copy.position.set(dx * TILE_SIZE, 0, dz * TILE_SIZE)
+        this.surfaces.push(copy)
+      }
+    }
+    this.events = new RustEvents(bake, this.surfaceUniforms)
+    this.section = new RustSection(bake, this.surfaceUniforms, 0)
+    this.sem = new RustSEM(this.volume, this.steelUniforms)
+    this.scene.add(...this.surfaces, this.events, this.section, this.sem)
     this.syncView()
     this.bakeDirty = false
     this.notify({kind: 'structure'})
   }
 
   private disposeBake() {
-    for (const mesh of [this.coreSurface, this.surroundSurface, this.coreEvents, this.surroundEvents, this.section]) {
+    for (const mesh of [...this.surfaces, this.events, this.section, this.sem]) {
       if (!mesh) continue
       mesh.removeFromParent()
       mesh.dispose()
     }
-    this.core?.dispose()
-    this.surround?.dispose()
-    this.coreSurface = this.surroundSurface = this.coreEvents = this.surroundEvents = this.section = null
-    this.core = this.surround = null
+    this.bake?.dispose()
+    this.volume?.dispose()
+    this.volume = null
+    this.surfaces = []
+    this.events = this.section = this.sem = null
+    this.bake = null
   }
 
-  /** Steps one grid by the clock's next step, with the drops of the moment it reaches. */
-  private stepGrid(renderer: WebGPURenderer, bake: RustBake) {
+  /** Steps the bake by the clock's next step, with the drops of the moment it reaches. */
+  private stepBake(renderer: WebGPURenderer, bake: RustBake) {
     const clock = this.clock
-    const dt = clock.stepSize(bake.time, bake.grid.stepScale)
+    const dt = clock.stepSize(bake.time)
     if (dt <= 0 || !this.drops) return false
     const time = bake.time + dt
     const drops = this.drops.stateAt(time)
@@ -308,25 +311,28 @@ export class Rust extends Document {
       smallRadius: drops.smallRadius, smallHeight: drops.smallHeight, microScale: drops.microScale,
       large: packLarge(drops), snapshotLayer: layer,
     })
+    // the volume grows what the step made, in the timeline ticks it reached
+    this.volume?.grow(renderer, this.tickAt(time))
     return true
   }
 
-  /** Bakes up to `target` (exposure s), at most `steps` steps per grid, stepping whichever grid is behind. */
+  /** The volume's growth tick of exposure time `t`: the timeline cut into `MAX_TICK + 1` ticks. */
+  private tickAt(t: number) {
+    return this.clock.timelineAt(t) / this.clock.duration * (MAX_TICK + 1)
+  }
+
+  /** Bakes up to `target` (exposure s), at most `steps` steps. */
   private advance(renderer: WebGPURenderer, target: number, steps: number) {
-    const core = this.core
-    const surround = this.surround
-    if (!core || !surround) return
-    let budget = steps * 2
-    while (budget-- > 0) {
-      const bake = core.time <= surround.time ? core : surround
-      if (bake.time >= target) break
-      if (!this.stepGrid(renderer, bake)) break
+    const bake = this.bake
+    if (!bake) return
+    for (let budget = steps; budget > 0 && bake.time < target; budget--) {
+      if (!this.stepBake(renderer, bake)) break
     }
   }
 
-  /** Exposure time (s) both grids have reached. */
+  /** Exposure time (s) the bake has reached. */
   get bakedExposure() {
-    return Math.min(this.core?.time ?? 0, this.surround?.time ?? 0)
+    return this.bake?.time ?? 0
   }
 
   override onRendererInitialized(renderer: WebGPURenderer) {
@@ -340,48 +346,58 @@ export class Rust extends Document {
   override onBeforeDraw(renderer: WebGPURenderer) {
     this.renderer = renderer
     if (this.bakeDirty) this.rebuild(renderer)
-    const core = this.core
-    const surround = this.surround
-    if (!core || !surround) return
+    if (!this.bake) return
     const playhead = Math.min(this.clock.exposureAt(this.timeline.currentTime), this.clock.totalExposure)
     if (this.liveView && this.bakedExposure > playhead + 1) {
       this.rebuild(renderer)
       return
     }
+    const grownTo = this.volume?.tick ?? 0
     this.advance(renderer, this.liveView ? playhead : this.clock.totalExposure, Math.max(1, Math.round(this.bakeSpeed)))
-    this.updateDisplay(playhead)
+    // playback is not real time: the playhead waits for the bake where it would overtake it
+    const frontier = this.clock.timelineAt(this.bakedExposure)
+    if (this.bakedExposure < this.clock.totalExposure && this.timeline.currentTime > frontier + 1e-6) {
+      this.timeline.currentTime = frontier
+    }
+    this.updateDisplay(Math.min(this.clock.exposureAt(this.timeline.currentTime), this.clock.totalExposure))
+    // the SEM's density follows the playhead, and what the volume grew just past it (growing in already)
+    if (this.sem?.visible && this.volume) {
+      const grew = this.volume.tick !== grownTo && this.volume.tick < this.sem.tick.value + 4
+      this.sem.update(renderer, grew)
+    }
   }
 
   /** The snapshots (and their blend) that show `playhead`, as far as the bake has come. */
   private updateDisplay(playhead: number) {
     const shown = Math.min(playhead, this.bakedExposure)
     const blend = this.clock.snapshotBlend(shown)
-    const grids: [RustBake | null, SurfaceUniforms][] = [[this.core, this.coreUniforms], [this.surround, this.surroundUniforms]]
-    for (const [bake, u] of grids) {
-      if (!bake) continue
+    const bake = this.bake
+    if (bake) {
       let {a, b, weight} = blend
       if (b >= bake.snapshotsWritten) {
         a = b = Math.max(Math.min(a, bake.snapshotsWritten - 1), 0)
         weight = 0
       }
+      const u = this.surfaceUniforms
       u.layerA.value = a
       u.layerB.value = b
       u.weight.value = weight
       u.time.value = shown
+      if (this.section) this.section.written.value = Math.min(blend.b + 1, bake.snapshotsWritten)
     }
-    if (this.section && this.core) this.section.written.value = Math.min(blend.b + 1, this.core.snapshotsWritten)
+    if (this.sem) this.sem.tick.value = this.tickAt(shown)
     const progress = this.bakedExposure / this.clock.totalExposure
     if (Math.abs(progress - this.bakeProgress) > 0.002 || (progress === 1 && this.bakeProgress !== 1)) this.bakeProgress = progress
   }
 
-  /** Bakes (synchronously, for headless checks) until both grids reach `days` days, and waits for the GPU. */
+  /** Bakes (synchronously, for headless checks) until the bake reaches `days` days, and waits for the GPU. */
   async bakeUntil(days: number) {
     const renderer = this.renderer
     if (!renderer) throw new Error('Rust: no renderer yet')
     if (this.bakeDirty) this.rebuild(renderer)
     const target = Math.min(days * SECONDS_PER_DAY, this.clock.totalExposure)
     while (this.bakedExposure < target - 1e-6) this.advance(renderer, target, 64)
-    if (this.core) await renderer.getArrayBufferAsync(this.core.eventCount)
+    if (this.bake) await renderer.getArrayBufferAsync(this.bake.eventCount)
     return this.bakedExposure / SECONDS_PER_DAY
   }
 
@@ -390,11 +406,23 @@ export class Rust extends Document {
     this.bakeDirty = true
   }
 
-  /** The fields of a grid, read back (headless checks). */
-  async readBake(grid: 'core' | 'surround') {
-    const bake = grid === 'core' ? this.core : this.surround
+  /** The bake's fields, read back (headless checks). */
+  async readBake() {
+    const bake = this.bake
     if (!bake || !this.renderer) throw new Error('Rust: no bake yet')
     return {grid: bake.grid, time: bake.time, steps: bake.steps, ...await bake.read(this.renderer)}
+  }
+
+  /** The volume's voxel counts by kind, its column tops and crystals, read back (headless checks). */
+  async readVolume() {
+    if (!this.volume || !this.renderer) throw new Error('Rust: no volume yet')
+    return {tick: this.volume.tick, ...await this.volume.readCounts(this.renderer)}
+  }
+
+  /** A block of the volume's voxels, read back (headless checks). */
+  async readVolumeBlock(x0: number, y0: number, size: number) {
+    if (!this.volume || !this.renderer) throw new Error('Rust: no volume yet')
+    return this.volume.readBlock(this.renderer, x0, y0, size)
   }
 
   /** The drop model and salt at exposure `t` (headless checks). */
@@ -431,8 +459,8 @@ registerEditor(Rust, {
     Specimen: ['heroCrystal', 'saltLoad', 'chlorideDeposition', 'carbon', 'inclusions'],
     Bake: ['bakeSpeed'],
     Hidden: [
-      'camera', 'clock', 'salt', 'drops', 'core', 'surround', 'coreSurface', 'surroundSurface', 'coreEvents',
-      'surroundEvents', 'section', 'coreUniforms', 'surroundUniforms', 'steelUniforms', 'bakeDirty', 'renderer',
+      'camera', 'clock', 'salt', 'drops', 'bake', 'volume', 'sem', 'surfaces', 'events', 'section', 'surfaceUniforms', 'steelUniforms',
+      'bakeDirty', 'renderer',
     ],
   },
 })

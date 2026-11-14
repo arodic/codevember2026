@@ -1,6 +1,6 @@
 import { ComputeNode, StorageBufferAttribute } from 'three/webgpu'
 import type { Node } from 'three/webgpu'
-import { Fn, float, instanceIndex, int, max, select, storage, vec4 } from 'three/tsl'
+import { Fn, instanceIndex, int, max, storage, vec4 } from 'three/tsl'
 
 /** One level of the multigrid pyramid: `size × size` cells, starting at `offset` in the shared buffers. */
 export interface MultigridLevel {
@@ -28,8 +28,9 @@ export function multigridLevels(size: number): MultigridLevel[] {
  *
  *   Σ_faces a_f D (u_i − u_j) + B_i u_i = F_i
  *
- * with `k = (a_east, a_north, B, ·)` per cell (`a` zero across the grid's edges and between cells that are not
- * coupled: no flux), `D` a per-component multiplier. The coarse levels are Galerkin for piecewise-constant
+ * with `k = (a_east, a_north, B, ·)` per cell (`a` zero between cells that are not coupled: no flux), `D` a
+ * per-component multiplier. The grid is periodic: the last column's east face and the last row's north face wrap to
+ * the first, on every level (a coarse face still sums the two fine faces it spans). The coarse levels are Galerkin for piecewise-constant
  * interpolation: a coarse cell sums its four children's `B` and residuals, a coarse face sums the two fine faces it
  * spans, and the correction is injected unchanged. That is variational (restriction = transposed interpolation, coarse
  * operator = R A P), so a cycle never adds energy: wet/dry masks and conductances a thousandfold apart cannot make it
@@ -100,18 +101,21 @@ export class Multigrid {
     return list
   }
 
+  /** Cell `(x, y)`'s neighbours on a level (wrapping around) and the coefficients of its west and south faces. */
+  neighbours(x: Node<'int'>, y: Node<'int'>, level: MultigridLevel) {
+    const n = level.size
+    const row = y.mul(n).add(level.offset)
+    const iE = row.add(x.add(1).mod(n))
+    const iW = row.add(x.add(n - 1).mod(n))
+    const iN = y.add(1).mod(n).mul(n).add(x).add(level.offset)
+    const iS = y.add(n - 1).mod(n).mul(n).add(x).add(level.offset)
+    return {iE, iW, iN, iS, aW: this.kNode.element(iW).x, aS: this.kNode.element(iS).y}
+  }
+
   /** `A u` at cell `i` = (x, y) of a level. */
   apply(i: Node<'int'>, x: Node<'int'>, y: Node<'int'>, level: MultigridLevel, d: Diffusivity) {
-    const n = level.size
     const k = this.kNode.element(i)
-    const hasW = x.greaterThan(0)
-    const hasS = y.greaterThan(0)
-    const iE = select(x.lessThan(n - 1), i.add(1), i)
-    const iW = select(hasW, i.sub(1), i)
-    const iN = select(y.lessThan(n - 1), i.add(n), i)
-    const iS = select(hasS, i.sub(n), i)
-    const aW = select(hasW, this.kNode.element(iW).x, float(0))
-    const aS = select(hasS, this.kNode.element(iS).y, float(0))
+    const {iE, iW, iN, iS, aW, aS} = this.neighbours(x, y, level)
     const D = vec4(d[0], d[1], d[2], d[3])
     const ui = this.uNode.element(i)
     const flux = ui.sub(this.uNode.element(iE)).mul(k.x)
@@ -134,14 +138,7 @@ export class Multigrid {
       const x = t.mod(half).mul(2).add(y.add(color).mod(2))
       const i = y.mul(n).add(x).add(level.offset)
       const k = this.kNode.element(i).toVar()
-      const hasW = x.greaterThan(0)
-      const hasS = y.greaterThan(0)
-      const iE = select(x.lessThan(n - 1), i.add(1), i)
-      const iW = select(hasW, i.sub(1), i)
-      const iN = select(y.lessThan(n - 1), i.add(n), i)
-      const iS = select(hasS, i.sub(n), i)
-      const aW = select(hasW, this.kNode.element(iW).x, float(0))
-      const aS = select(hasS, this.kNode.element(iS).y, float(0))
+      const {iE, iW, iN, iS, aW, aS} = this.neighbours(x, y, level)
       const D = vec4(d[0], d[1], d[2], d[3])
       const neighbours = this.uNode.element(iE).mul(k.x)
         .add(this.uNode.element(iW).mul(aW))
@@ -221,8 +218,9 @@ export class Multigrid {
 
 /**
  * The same multigrid on the CPU, one component, for tests: solves `Σ a D (u_i − u_j) + B u_i = F` on level 0 given
- * `aE`, `aN`, `B`, `F` (size² each, `aE`/`aN` zero on the last column/row) from `u0`, in `cycles` V-cycles, returning
- * the solution and the residual norm before each cycle and after the last.
+ * `aE`, `aN`, `B`, `F` (size² each; the last column's east and the last row's north faces wrap around, so zero
+ * there is a closed edge) from `u0`, in `cycles` V-cycles, returning the solution and the residual norm before each
+ * cycle and after the last.
  */
 export function multigridReference(
   size: number, aE: Float64Array, aN: Float64Array, B: Float64Array, F: Float64Array, u0: Float64Array,
@@ -256,29 +254,28 @@ export function multigridReference(
   }
 
   type Level = typeof levels[number]
-  const apply = (L: Level, x: number, y: number) => {
+  /** The four faces of cell (x, y): neighbour index and coefficient, wrapping around. */
+  const faces = (L: Level, x: number, y: number) => {
     const n = L.n
     const i = y * n + x
-    const ui = L.u[i]
+    const w = y * n + (x + n - 1) % n
+    const s = ((y + n - 1) % n) * n + x
+    return [[y * n + (x + 1) % n, L.aE[i]], [w, L.aE[w]], [((y + 1) % n) * n + x, L.aN[i]], [s, L.aN[s]]] as const
+  }
+  const apply = (L: Level, x: number, y: number) => {
+    const i = y * L.n + x
     let flux = 0
-    if (x < n - 1) flux += L.aE[i] * (ui - L.u[i + 1])
-    if (x > 0) flux += L.aE[i - 1] * (ui - L.u[i - 1])
-    if (y < n - 1) flux += L.aN[i] * (ui - L.u[i + n])
-    if (y > 0) flux += L.aN[i - n] * (ui - L.u[i - n])
-    return flux * d + L.B[i] * ui
+    for (const [j, a] of faces(L, x, y)) flux += a * (L.u[i] - L.u[j])
+    return flux * d + L.B[i] * L.u[i]
   }
   const smooth = (L: Level, color: number) => {
     const n = L.n
     for (let y = 0; y < n; y++) {
       for (let x = (y + color) % 2; x < n; x += 2) {
-        const i = y * n + x
         let neighbours = 0
         let sum = 0
-        if (x < n - 1) { neighbours += L.aE[i] * L.u[i + 1]; sum += L.aE[i] }
-        if (x > 0) { neighbours += L.aE[i - 1] * L.u[i - 1]; sum += L.aE[i - 1] }
-        if (y < n - 1) { neighbours += L.aN[i] * L.u[i + n]; sum += L.aN[i] }
-        if (y > 0) { neighbours += L.aN[i - n] * L.u[i - n]; sum += L.aN[i - n] }
-        L.u[i] = (L.F[i] + d * neighbours) / Math.max(d * sum + L.B[i], 1e-30)
+        for (const [j, a] of faces(L, x, y)) { neighbours += a * L.u[j]; sum += a }
+        L.u[y * n + x] = (L.F[y * n + x] + d * neighbours) / Math.max(d * sum + L.B[y * n + x], 1e-30)
       }
     }
   }

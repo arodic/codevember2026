@@ -25,12 +25,29 @@ function cellHash(cell: Node<'vec2'>, salt: number, seed: Node<'float'>) {
   return hash(x.bitXor(y).bitXor(uint(seed).mul(2654435761)).bitXor(uint(salt * 40503 + 1)))
 }
 
+/** Smooth value noise (0–1) at `p` in lattice units, salted. */
+function valueNoise(p: Node<'vec2'>, salt: number, seed: Node<'float'>) {
+  const base = floor(p)
+  const t = p.sub(base)
+  const s = t.mul(t).mul(float(3).sub(t.mul(2)))
+  const corner = (dx: number, dy: number) => cellHash(base.add(vec2(dx, dy)), salt, seed)
+  return mix(mix(corner(0, 0), corner(1, 0), s.x), mix(corner(0, 1), corner(1, 1), s.x), s.y)
+}
+
 /**
- * Ferrite grains as a jittered Voronoi tessellation of `GRAIN_SIZE`: `(distance to the nearest grain centre, to the
- * second nearest, hash A, hash B)` of the grain at `p` (µm), the hashes picking its constituent and orientation.
+ * Ferrite grains as a jittered Voronoi tessellation of `GRAIN_SIZE`, looked up through a smooth warp (two octaves of
+ * value noise, ~0.35 grain): real grains are irregular polygons with curving boundaries, never a straight-edged
+ * tessellation. `(distance to the nearest grain centre, to the second nearest, hash A, hash B)` of the grain at `p`
+ * (µm), the hashes picking its constituent and orientation. A hidden driver: only its soft effect on dissolution
+ * ever shows.
  */
 export const steelGrain = Fn(([p, seed]: [Node<'vec2'>, Node<'float'>]) => {
-  const g = p.div(GRAIN_SIZE)
+  const q = p.div(GRAIN_SIZE * 0.6)
+  const warp = vec2(
+    valueNoise(q, 31, seed).add(valueNoise(q.mul(2.3), 33, seed).mul(0.5)),
+    valueNoise(q, 32, seed).add(valueNoise(q.mul(2.3), 34, seed).mul(0.5)),
+  ).sub(0.75).mul(GRAIN_SIZE * 0.45)
+  const g = p.add(warp).div(GRAIN_SIZE)
   const base = floor(g)
   const f1 = float(1e9).toVar()
   const f2 = float(1e9).toVar()
@@ -110,16 +127,17 @@ export const steelScratch = Fn(([p, seed]: [Node<'vec2'>, Node<'float'>]) => {
 
 /**
  * The steel at `p` (µm) as the bake needs it: `(anodic multiplier, MnS, trench, cementite)`. The multiplier is the
- * grain's orientation (0.75–1.3, crystallographic dissolution), boundaries 1.6× within ~0.5 µm, ferrite in pearlite
- * 1.25× (galvanic against the cementite, which does not dissolve) and scratched steel a little faster. MnS is 1 inside
- * an inclusion; the trench is the ~1 µm of steel around it, where pits start (Muto, Chiba et al.).
+ * grain's orientation (0.9–1.12, crystallographic dissolution: gentle, so grains etch in relief rather than as
+ * terraces), boundaries up to 1.15× within ~1.5 µm, ferrite in pearlite 1.25× (galvanic against the cementite,
+ * which does not dissolve) and scratched steel a little faster. MnS is 1 inside an inclusion; the trench is the ~1 µm
+ * of steel around it, where pits start (Muto, Chiba et al.).
  */
 export const steelSample = Fn(([p, seed, pearlite, inclusions]: [
   Node<'vec2'>, Node<'float'>, Node<'float'>, Node<'float'>,
 ]) => {
   const grain = steelGrain(p, seed)
-  const orientation = mix(0.75, 1.3, grain.w)
-  const boundary = float(1).add(smoothstep(1.0, 0.25, grain.y.sub(grain.x)).mul(0.6))
+  const orientation = mix(0.9, 1.12, grain.w)
+  const boundary = float(1).add(smoothstep(3.0, 0.2, grain.y.sub(grain.x)).mul(0.15))
   const angle = fract(grain.w.mul(7.31)).mul(Math.PI)
   const phase = fract(dot(p, vec2(cos(angle), sin(angle))).div(LAMELLA_SPACING))
   const inPearlite = grain.z.lessThan(pearlite)

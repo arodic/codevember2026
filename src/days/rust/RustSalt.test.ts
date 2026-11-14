@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { RustClock } from './RustClock.js'
-import { CORE_SIZE, CRITICAL_RADIUS, DropModel, SURROUND_SIZE, generateSalt } from './RustSalt.js'
+import { CRITICAL_RADIUS, DropModel, TILE_SIZE, generateSalt, tileDistance, wrapTile } from './RustSalt.js'
 import { SECONDS_PER_DAY, saltCubeMass } from './RustScience.js'
 
 const options = {seed: 7, heroEdge: 28, saltLoad: 20, chlorideDeposition: 60, exposureDays: 30}
@@ -9,17 +9,27 @@ describe('Rust salt', () => {
   const salt = generateSalt(options)
   const clock = new RustClock({exposureDays: 30, secondsPerDay: 5, seed: 7})
 
-  it('puts the hero near the centre, one neighbour in the core and the rest outside it', () => {
+  it('puts the hero near the centre and one neighbour 200–260 µm off, on the periodic tile', () => {
     const [hero, neighbour, ...others] = salt.large
     expect(Math.hypot(hero.x, hero.z)).toBeLessThan(15)
     expect(hero.edge).toBe(28)
-    expect(Math.max(Math.abs(neighbour.x), Math.abs(neighbour.z))).toBeLessThan(CORE_SIZE / 2 - 100)
-    expect(others.length).toBe(3)
-    for (const d of others) expect(Math.hypot(d.x, d.z)).toBeGreaterThan(600)
+    const distance = tileDistance(hero.x, hero.z, neighbour.x, neighbour.z)
+    expect(distance).toBeGreaterThan(199)
+    expect(distance).toBeLessThan(261)
+    expect(others.length).toBe(0)
+    for (const d of [...salt.large, ...salt.small, ...salt.micro]) {
+      expect(Math.abs(d.x)).toBeLessThanOrEqual(TILE_SIZE / 2)
+      expect(Math.abs(d.z)).toBeLessThanOrEqual(TILE_SIZE / 2)
+    }
+  })
+
+  it('measures distances through the nearest periodic image', () => {
+    expect(wrapTile(TILE_SIZE / 2 + 5)).toBeCloseTo(-TILE_SIZE / 2 + 5, 9)
+    expect(tileDistance(-TILE_SIZE / 2 + 2, 0, TILE_SIZE / 2 - 3, 0)).toBeCloseTo(5, 9)
   })
 
   it('scatters small crystals by mass, at the start and every day', () => {
-    const area = (SURROUND_SIZE * 1e-4) ** 2
+    const area = (TILE_SIZE * 1e-4) ** 2
     const initial = salt.small.filter(d => d.time < 0).reduce((sum, d) => sum + saltCubeMass(d.edge), 0)
     expect(initial * 1e6 / area).toBeCloseTo(20, 0)
     const day3 = salt.small.filter(d => d.time >= 3 * SECONDS_PER_DAY && d.time < 4 * SECONDS_PER_DAY)
@@ -40,7 +50,7 @@ describe('Rust salt', () => {
     expect(mean(near)).toBeGreaterThan(2 * mean(far))
     for (let i = 0; i < hero.length; i += 7) {
       for (let j = i + 1; j < hero.length; j++) {
-        expect(Math.hypot(hero[i].x - hero[j].x, hero[i].z - hero[j].z)).toBeGreaterThan(hero[i].radius + hero[j].radius)
+        expect(tileDistance(hero[i].x, hero[i].z, hero[j].x, hero[j].z)).toBeGreaterThan(hero[i].radius + hero[j].radius)
       }
     }
   })

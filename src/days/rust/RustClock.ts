@@ -200,12 +200,12 @@ export class RustClock {
 
   /**
    * The bake's next step from `t`: 10 s at first, growing with the time elapsed to `WET_STEP` while there is
-   * electrolyte, `DRY_STEP` while there is none, times `scale`, never past the next snapshot or the end.
+   * electrolyte, `DRY_STEP` while there is none, never past the next snapshot or the end.
    */
-  stepSize(t: number, scale = 1) {
+  stepSize(t: number) {
     const wet = this.wetAt(t)
     const base = t < 600 ? 10 : Math.min(Math.max(t * 0.05, 10), WET_STEP)
-    const step = (wet ? base : Math.max(base, DRY_STEP)) * scale
+    const step = wet ? base : Math.max(base, DRY_STEP)
     return Math.max(Math.min(step, this.nextSnapshot(t) - t, this.totalExposure - t), 0)
   }
 

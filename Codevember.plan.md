@@ -129,8 +129,11 @@ todos:
     content: "Day 11 (Rust): research (rust phase morphology, Evans drop + secondary spreading, Stratmann wet/dry, SEM image formation) + bake-then-evaluate architectural plan in Codevember.plan.md"
     status: completed
   - id: rust-phase1-bake
-    content: "Day 11 (Rust) Phase 1: adjustable exposure clock (exposureDays, secondsPerDay) + climate, steel microstructure, sea-salt scatter + daily deposition + hygroscopics + drops/coalescence/microdroplets, nested core/surround GPU multigrid electrochemistry/transport/precipitation/phase bake, snapshots + nucleation events, fieldView debug + section slice, unit tests"
-    status: pending
+    content: "Day 11 (Rust) Phase 1: adjustable exposure clock (exposureDays, secondsPerDay) + climate, steel microstructure, sea-salt scatter + daily deposition + hygroscopics + drops/coalescence/microdroplets, periodic-tile GPU multigrid electrochemistry/transport/precipitation/phase bake, snapshots + nucleation events, fieldView debug + section slice, unit tests"
+    status: completed
+  - id: rust-volume
+    content: "Day 11 (Rust): volumetric material — time-encoded voxel volume (steel + rust, birth/death ticks, crystals keyed to their nucleus), steel etch, shared 3D growth (habits, surface-normal crystal frames, nucleation-limited islands, drift, repose, soft ceiling), globule SEM raymarch; playback waits for the bake"
+    status: in_progress
   - id: rust-phase2-surface-sem
     content: "Day 11 (Rust) Phase 2: steel/crust height-field surface, SemSignal (secant SE, edge/thin, BSE Z, detector visibility, cavity, detector modes), SemImage (noise, scan reveal, optional data bar), stage camera (Surface, Overview, Free)"
     status: pending
@@ -538,6 +541,9 @@ Sizes marked "est." are read off the references; the others are from the sources
 
 ### Architecture & Technical Breakdown
 
+> Superseded in part on 2026-11-13 (see **Implementation** below): one periodic tile replaces the nested core and
+> surround, and a voxel volume replaces the height-field surface and the instanced crystals as the drawn material.
+
 **Key decision: bake, then evaluate.**
 - A deterministic GPU simulation runs ahead of the playhead and records snapshots and crystal nucleation events.
 - Everything drawn is a function of timeline time.
@@ -725,15 +731,108 @@ Sizes marked "est." are read off the references; the others are from the sources
       Target 60 fps at 1080p.
     - Memory: ~130 MB of snapshots (core and surround), ~5 MB of events.
 
+### Implementation (2026-11-13)
+
+**Tile.** One periodic 640 µm tile at 1.25 µm (512²) replaces the core and surround: the multigrid, every stencil,
+the salt footprints, caps and films wrap (minimum-image distances), the salt field and the drop model live on the tile
+(hero + one neighbour 200–260 µm off, small crystals). The stage shows the tile and its repeats (`REPEATS` 3).
+
+**Chemistry fixes.**
+- Fast-reaction Fe(OH)₂ precipitation: how much is exact, each cell's mix `min(Fe, max(A, 0)/2)` after the transport
+  (the solution keeps the local split exactly, Z conserved); where it goes is the quasi-steady split (see Update
+  2026-11-14; the transport operator applied to the mix, `P = (B + L)·m`, amplified the solve's rounding ~10⁵×).
+- Acid kept: oxygenation and magnetite formation release 2H⁺ per Fe²⁺ (no more "acid dissolves the same iron");
+  ferrous chloride past 4 M oxidizes with its acid; dried films keep their alkali or acid; a salt-film factor
+  throttles dissolution near FeCl₂ saturation; green rust takes up Cl⁻ for an OH⁻, never more Cl⁻ than there is.
+- pH buffered by air's CO₂ (`filmPH`: HCO₃⁻/CO₃²⁻ in equilibrium, pure water 5.6, alkali films 10–11); carbonation
+  no longer removes alkalinity (it neutralizes the anolyte's acid instead).
+- Labels propagate by kind (next to a film: passive film; next to a drop: the drop), not always as an anode.
+- Drying: when the clock's salt is effloresced, the brine crystallizes in place (only alkali holds water); before,
+  former drops stayed wet as hygroscopic brine and corroded through the dry periods.
+- Calibration: exchange currents scaled together (anodic 0.055, cathodic 0.08 A/m²; Stratmann reduction 0.03) to
+  ~0.25 A/m² at the anode, the middle of thin-NaCl-film measurements; Stratmann reduction unscaled had been a runaway
+  cathode growing rust on itself.
+- Result (3 d): anode under the drop, passive cathodic film; ~2 µm of iron lost under the drop (~0.7 µm/day);
+  rust 6–8 µm through the drop, ~1 µm outside; iron and chloride conserved to < 0.01%; deterministic.
+  Open: the Evans ring is weak (micro-drops are not O₂-diffusion-limited at these currents); a coffee-ring transport
+  of colloidal precipitate to the pinned contact line during evaporation would make it, and is the next lever.
+
+**Volume (`RustVolume`).**
+- 512² × 64 r32uint voxels (1.25 µm, one per bake cell; −20 to +60 µm), 64 MB; constants are in µm, so
+  `VOLUME_SIZE`/`VOLUME_LAYERS` are the resolution's one setting (1024² × 128 at 0.625 µm: ~512 MB). A voxel packs its kind (12 bits: empty, steel,
+  matrix rust of a phase, or a crystal with its nucleus's column offset), birth and death ticks (10 bits each; the
+  timeline cut into 1023 ticks): the whole exposure in one volume, scrubbable.
+- Per tick: the bake's fresh rust per phase (deposit accumulators, Fe-µm) is smoothed 3×3; the steel etches (each
+  column dissolves its iron loss among exposed steel voxels, corners first; a voxel goes at 0.3–0.7 of it so
+  passive steel never pits); growth: wants → candidate weights → each column's want shared over its 3×3 by weight
+  (rust lands on flanks, not only tips) → dithered placement (unbiased, carry with credit) → drift (debts of bare
+  neighbourhoods move to rust) and repose spill.
+- Weights: pockets before tips (`SMOOTHING`), inner phases near the metal, outer anywhere under the electrolyte,
+  bare steel draws little (islands nucleate by fresh precipitate, `SEED`), slope above the neighbourhood's mean,
+  soft ceiling, crystal habit boost.
+- Crystals: nucleated per phase by fresh iron (`NUCLEATION`), one per column, frame from the local surface normal
+  (tilted) or inherited from an adjacent crystal of the phase (rotated a little); habits: goethite needle sheaves,
+  akaganeite spindles, lepidocrocite rosettes, green rust hexagonal plates, magnetite octahedra.
+- Checks: rust volume within 4% of the bake's at 3 d; two bakes identical (voxels, counts, crystals, snapshots).
+
+**SEM (`RustSEM`).** A box over the tile and its repeats, raymarched on a smooth density of the voxels at the
+playhead (see Update 2026-11-14): bricks (8³, earliest birth) skipped, the density sampled, the hit sphere-traced
+(isosurface with a granular texture; crystal voxels shaped by habit in their frame); SE shading (tilt secant, thin
+edges, detector side and shadow, pockets), false color blended from the phases around, grinding scratches on the
+metal, detector noise. Playback waits for the bake.
+
+**Steel grains** are a warped Voronoi (curving boundaries) with gentle contrast (orientation 0.9–1.12, boundaries
+1.15×): a hidden driver of etching, never drawn.
+
+### Update (2026-11-14)
+
+**Volume reduced** (user: "for now") to 512² × 64 at 1.25 µm: 64 MB, 3 d bakes in ~2 s headless.
+
+**Precipitation, quasi-steady.** A step (minutes) is long against diffusion across a drop (seconds), and
+`ψ = Fe²⁺ − A/2` diffuses linearly (precipitation leaves it alone): where `ψ > 0` the OH⁻ made there precipitates in
+place, where `ψ < 0` the Fe²⁺ made there does, and the flux across the front `ψ = 0` (`D k |Δψ|` through each face it
+crosses, by the transport's own face coefficients) precipitates on it. Each patch's exact total (the mix) is placed by
+these estimates (scaled down if over; what they miss goes where the mix was). Only faces within `FRONT_REACH` (10 µm)
+of a drop's edge count: in the thin film the flux estimate is the solve's error times a large conductance (microdroplet
+hot spots 100–400 µm thick). The old `P = (B + L)·m` (`D dt/dx² ~ 4·10⁵`) gave a cell-scale checkerboard and hot spots,
+the real cause of the pillar forests (spotty deposits). Also: the species residual shift goes to each patch's drop
+cells only (not its thin film); a drop's label wins over its microdroplets' (`atomicMax` order); microdroplets its
+edge reaches coalesce into it.
+
+**Evans ring, verdict.** These drops (R 60–90 µm, H ~30 µm) are not O₂-limited (`4FDC/h` ≈ 1 A/m² vs ~0.25 A/m²
+anodic), spend most of the wet time alkaline, and precipitate their Fe²⁺ where it is made: uniform rust across the drop
+(~14 µm crust, ~2.6 µm iron lost at 3 d), MnS streaks and pit caps, a thin rim, a clean alkaline film outside. A
+strong ring needs mm drops (O₂-limited centre); the drying coffee ring is weak at these rates (colloids settle in
+minutes, evaporation follows RH over hours). Open: by 10 d the second drop's film floods with its Fe²⁺ (fast-reaction
+ψ physics) and dusts with rust; a real spreading film stays alkaline (precipitate membrane at the edge, not modelled).
+
+**Growth.** Fe(OH)₂, green rust, ferrihydrite and magnetite form on bare metal (only the oxyhydroxides need rust to
+nucleate on: `BARE_DRAW` outer only); pocket preference solid faces^1.6/1.4; site noise ±30% (was ×5): a compact
+crust (98% filled between steel and top).
+
+**SEM density.** Per-voxel globules drew a crust's 1-voxel column steps as rounded boxes (a "city"). Now a compute
+pass redraws a smooth density at the playhead (each voxel `(1 − d²/4)³` over its 3×3×3; rust, steel, crystals in an
+rgba8 3D texture, hardware-filtered; `SURFACE` 1.4 keeps two touching voxels, a crust's face ~0.4 voxel out),
+every quarter tick or when the bake grows voxels near the playhead; voxels whose neighbourhood bricks have nothing
+born skip the sum (8.4 → 3.6 ms per pass headless). Surface = isosurface + granular noise (`mx_noise_float`,
+0.6 µm); crystals keep their habit SDFs; colors blend the 8 nearest voxels' phases. Result: botryoidal crust with
+rosette plates, rounded nodules at 1 d, ~60 fps headless at Close.
+
+**Next:** the ceiling (tall ferrihydrite ridges over MnS trenches reach the top of the 80 µm volume by 10 d: more
+layers once memory allows, or rust that compacts); drops and salt in the SEM image (ESEM-dark liquid, NaCl cubes);
+crack networks on drying (death ticks along a fractured crust); the session choreography and capture.
+
 ### Todo Breakdown
 
 - [x] **1. Research & plan (`rust-plan`):** Morphology, electrochemistry, secondary spreading and SEM image formation, from the sources above, and this plan.
-- [ ] **2. Phase 1 — Science bake & field views (`rust-phase1-bake`):**
-  - Build: the clock and climate (`exposureDays`, `secondsPerDay`); the steel microstructure; the salt scatter, daily deposition, hygroscopics, drops and coalescence; multigrid on the two nested grids; electrochemistry, transport, precipitation and phase rules; snapshots and events; `fieldView` and the debug slice on a flat-shaded height field. Enable `Rust` in `IoCodevember.ts`.
+- [x] **2. Phase 1 — Science bake & field views (`rust-phase1-bake`):**
+  - Build: the clock and climate (`exposureDays`, `secondsPerDay`); the steel microstructure; the salt scatter, daily deposition, hygroscopics, drops and coalescence; multigrid on the periodic tile; electrochemistry, transport, precipitation and phase rules; snapshots and events; `fieldView` and the debug slice on a flat-shaded height field. Enable `Rust` in `IoCodevember.ts`.
   - Unit tests: Faraday, Stumm–Lee half-lives, $i_{\lim}$, hysteresis, molar volumes, the clock.
   - Headless checks: bake determinism, no NaN, the Evans pattern.
+- [ ] **2b. Volumetric material (`rust-volume`):** voxel volume, etch, growth, crystals, density SEM raymarch, quasi-steady
+  precipitation (done, see Implementation and Update 2026-11-14); next: the ceiling, drops and salt in the image, cracks.
 - [ ] **3. Phase 2 — Surface & SEM image (`rust-phase2-surface-sem`):**
-  - The steel and crust height-field surface with phase micro-relief.
+  - ~~The steel and crust height-field surface with phase micro-relief.~~ (the volume)
   - `SemSignal`: secant SE, edge and thin terms, BSE Z̄, the detector march and shadow map, the cavity term, detector modes, `beamEnergy`.
   - `SemImage`: noise, scan, reveal, the optional data bar.
   - The stage camera in `Surface`, `Overview` and `Free`.

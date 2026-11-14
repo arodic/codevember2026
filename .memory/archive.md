@@ -302,3 +302,19 @@ Complete log. Entries before 2026-11-12 11:00 were written in the io repo (packa
 - Bug: rebake inherited prior SH/env → successive zero-light bakes got darker gradually; bluish residual from rock rim emissive + sky portal + teal bg + ungated shafts/rimstone glint.
 - Fix: clear stage disposes+recreates LightProbeGrid + clears PMREM env before direct; zero-intensity lights hidden; skyEmitter gates portal/shafts/rimstone; emissive rim off; bg #000.
 - Solo-light workflow: zero all → rebake (black) → enable one → rebake.
+
+## 2026-11-13 [rust] Phase 1 bake + periodic tile + volumetric material
+- Chemistry: fast-reaction precipitation conservative (clamp + per-patch rescale), acid kept (no acid-dissolves-iron), CO₂-buffered pH, GR Cl-limited, label kind propagation, brine crystallizes when effloresced, exchange currents ×1/18 (~0.25 A/m²), Stratmann reduction scaled (runaway cathode fixed). Fe/Cl conserved < 0.01%, deterministic.
+- Periodic 640 µm tile (multigrid + stencils + salt + drops wrap); surround grid removed; debug map tiled 3×3.
+- RustVolume: time-encoded voxels (kind|birth|death), steel etch, shared 3D growth (habits, normal-framed crystals, islands, drift, repose, soft ceiling); RustSEM globule raymarch; playback waits for bake; Close stage.
+- Steel grains warped + softened (no visible Voronoi). Checks: typecheck, lint, 55 tests, build, determinism (voxels/counts/crystals/snapshots identical).
+- Open: Evans ring weak (coffee-ring transport next), cracks, drops/salt in image, render cost.
+
+## 2026-11-14 [rust] smaller volume, quasi-steady precipitation, density SEM
+- Volume 512²×64 at 1.25 µm (user: reduce for now), constants in µm (one setting). 64 MB + 64 MB density.
+- Root cause of pillar forests: precipitation `P = (B+L)·m` ill-conditioned (D dt/dx² ~4e5) → cell checkerboard + single-cell hot spots (crust 100+ µm). Now quasi-steady: in-place (ψ>0: local OH; ψ<0: local Fe) + face flux D·k·|Δψ| across ψ=0 within FRONT_REACH 10 µm of a drop edge; patch total exact (mix), estimates scaled, misses by mix. Film-only fronts were solver error × conductance (microdroplet hot spots).
+- Also: species residual shift on drop cells only (per-label shift blew up: tiny film ΣB); drop label beats microdroplet (atomicMax + LABELS); microdroplets reached by drop edge coalesce. Membrane idea (drop↔film diffusion ×1e-3) killed the ring, removed.
+- Evans: drops R 60–90 µm not O₂-limited, mostly alkaline → uniform crust (~14 µm, 2.6 µm loss at 3 d), thin rim, clean film. Strong ring needs mm drops. 10 d: drop 1 film floods with Fe → dusting (open).
+- Growth: inner phases onto bare metal (BARE_DRAW outer only), pockets^1.6/1.4, noise ±30% → compact crust.
+- RustSEM: density pass (27-tap (1−d²/4)³, rgba8 3D, quarter-tick redraw, empty-brick skip 3.6 ms) + isosurface (SURFACE 1.4) + mx_noise grain + crystal habit SDFs + blended phase colors → botryoidal crust, rosettes, nodules; ~60 fps headless Close.
+- Checks: typecheck, lint, 55 tests, build, determinism. Open: ceiling by 10 d (more layers), drops/NaCl in image, cracks.

@@ -59,9 +59,13 @@ describe('Rust science', () => {
     expect(capHeight(10, Math.PI / 2)).toBeCloseTo(10, 6)
   })
 
-  it('reads the film pH from its alkalinity and ferrous hydrolysis', () => {
-    expect(filmPH(0, 0)).toBeCloseTo(7, 3)
-    expect(filmPH(1e-3, 0)).toBeCloseTo(11, 2)
-    expect(filmPH(0, 0.1)).toBeCloseTo(5.25, 1)
+  it('reads the film pH from its alkalinity, ferrous hydrolysis and the air\'s CO₂', () => {
+    expect(filmPH(0, 0)).toBeCloseTo(5.6, 1)
+    expect(filmPH(1e-3, 0)).toBeCloseTo(8.2, 1)
+    expect(filmPH(1, 0)).toBeCloseTo(10.56, 1)
+    expect(filmPH(-1e-3, 0)).toBeCloseTo(3, 2)
+    expect(filmPH(0, 0.1)).toBeCloseTo(5.2, 1)
+    // continuous where the two regimes meet
+    expect(Math.abs(filmPH(1.0001e-4, 0) - filmPH(0.9999e-4, 0))).toBeLessThan(0.01)
   })
 })

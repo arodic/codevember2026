@@ -7,6 +7,7 @@ import {
 } from 'three/tsl'
 import { Diffusivity, Multigrid } from './RustMultigrid.js'
 import {
+  CARBONATE_CO3, CARBONATE_HCO3,
   ALKALINITY_PER_CATHODIC, FARADAY, FERROUS_HYDROLYSIS, FERROUS_PER_ANODIC, IRON_LOSS_RATE,
   IRON_UM_PER_MOLAR_UM, NACL_DENSITY, NACL_MOLAR_MASS, OXYGEN_DIFFUSIVITY, OXYGEN_SALTING, OXYGEN_SOLUBILITY,
   RUST_PHASES, RUST_REDUCTION_RATE, SECONDS_PER_DAY, STUMM_LEE_K, brineMolarity, layerPerIron, naclMolality,
@@ -26,10 +27,14 @@ export const EVENT_PHASES = ['greenRust', 'lepidocrocite', 'goethite', 'akaganei
 
 /** Fixed-point scale of the salt-deposit accumulator (per M·µm). */
 const SALT_FIXED = 1000
-/** Anodic and cathodic kinetics: currents (A/m²) at the reference potential and natural-log Tafel slopes (V). */
-const ANODIC_EXCHANGE = 1.0
+/**
+ * Anodic and cathodic kinetics: currents (A/m²) at the reference potential and natural-log Tafel slopes (V). Scaled
+ * together (the mixed potential stays) so a corroding drop's anode averages ~0.25 A/m², ~0.8 µm of iron a day while
+ * wet: thin NaCl films on carbon steel measure 0.1–1 A/m² (Nishikata & Tsuru; Li & Hihara).
+ */
+const ANODIC_EXCHANGE = 0.055
 const ANODIC_TAFEL = 0.026
-const CATHODIC_EXCHANGE = 1.5
+const CATHODIC_EXCHANGE = 0.08
 const CATHODIC_TAFEL = 0.052
 /** Electrolyte potential (V, metal at 0) at which the electrode sits at the reference potential, its start. */
 const REFERENCE_POTENTIAL = 0.45
@@ -41,11 +46,12 @@ const PASSIVE_CURRENT = 1e-3
 const ANODIC_LIMIT = 20
 /** Fe²⁺ (M) past which a film precipitates ferrous salts (FeCl₂ is soluble to ~4–5 M). */
 const MAX_FERROUS = 4
-/** Alkalinity (M) atmospheric CO₂ buffers a film back to (pH ~10.5), and how fast (s). */
-const CARBONATED_ALKALINITY = 3e-4
-const CARBONATION_TIME = 3600
-/** Lepidocrocite reduction current (A/m², Stratmann) with plenty of it to reduce. */
-const RUST_REDUCTION = 0.5
+/**
+ * Lepidocrocite reduction current (A/m², Stratmann) at the reference potential with plenty of it to reduce: a cathode
+ * beside O₂ reduction, scaled with it (`CATHODIC_EXCHANGE`), so rust reduces as it wets without becoming the cathode
+ * that grows more rust on itself.
+ */
+const RUST_REDUCTION = 0.03
 /** Share of the ionic current Cl⁻ carries in NaCl brine. */
 const CHLORIDE_TRANSFERENCE = 0.6
 /** Concentration (M) a drop's NaCl can reach supersaturated, while the climate keeps it liquid. */
@@ -59,6 +65,8 @@ const OXYGEN_LIMIT = 4 * FARADAY * OXYGEN_DIFFUSIVITY * 1e6
  */
 const SPECIES_DIFFUSIVITY: Diffusivity = [1500, 2030, 1500, 0]
 const POTENTIAL_DIFFUSIVITY: Diffusivity = [1, 1, 1, 1]
+/** How far (µm) past a drop's edge its Fe²⁺ can meet the film's alkalinity on a front (see `buildPrecipitate`). */
+const FRONT_REACH = 10
 /** Clusters nucleated per µm² per µm of iron precipitated, by `EVENT_PHASES`. */
 const NUCLEATION = [0.03, 0.008, 0.004, 0.02, 0.05]
 /**
@@ -78,19 +86,12 @@ const LP = {
   akaganeite: layerPerIron(RUST_PHASES.akaganeite), magnetite: layerPerIron(RUST_PHASES.magnetite),
 }
 
-/** A grid the bake runs on. */
+/** The periodic tile the bake runs on, centred on the origin. */
 export interface BakeGrid {
-  name: string
   /** Side (µm). */
   size: number
   /** Cells per side (a power of two). */
   resolution: number
-  centerX: number
-  centerZ: number
-  /** Snapshot texels per side = resolution / this. */
-  snapshotDownsample: number
-  /** Multiplies the clock's step: a coarser grid steps longer. */
-  stepScale: number
 }
 
 /** What a grid is given once per bake: its salt, microdroplets and how many snapshots it keeps. */
@@ -155,12 +156,15 @@ function harmonic(a: Node<'float'>, b: Node<'float'>) {
   return a.mul(b).mul(2).div(a.add(b).add(1e-30))
 }
 
-/** pH from the alkalinity (M of OH⁻ less H⁺) and Fe²⁺ (M; its hydrolysis adds acid), in float32 without cancellation. */
+/** `filmPH` of RustScience (carbonate-buffered in air) in float32, without cancellation. */
 function filmPH(alkalinity: Node<'float'>, ferrous: Node<'float'>) {
   const effective = alkalinity.sub(sqrt(max(ferrous, 0).mul(FERROUS_HYDROLYSIS)))
-  const root = sqrt(effective.mul(effective).add(4e-14))
-  const hydroxide = select(effective.greaterThanEqual(0), effective.add(root).mul(0.5), float(2e-14).div(root.sub(effective)))
-  return log10(max(hydroxide, 1e-14)).add(14)
+  const c1 = CARBONATE_HCO3 + 1e-14
+  const root = sqrt(effective.mul(effective).add(4 * c1))
+  const y = select(effective.greaterThanEqual(0), effective.add(root).mul(0.5), float(2 * c1).div(root.sub(effective)))
+  const acidic = log10(max(y, 1e-30)).sub(Math.log10(c1))
+  const x = effective.mul(2).div(sqrt(effective.mul(8 * CARBONATE_CO3).add(c1 * c1)).add(c1))
+  return select(effective.greaterThan(1e-4), log10(max(x, 1)), acidic)
 }
 
 /** Height (µm) of a spherical cap of base `radius` and height `height` at `r` from its axis. */
@@ -223,6 +227,12 @@ export class RustBake {
   readonly labelNext: StorageBufferAttribute
   /** (x, z, time, phase + size) per nucleation event. */
   readonly events: StorageBufferAttribute
+  /**
+   * Fresh rust since the volume last grew (Fe-µm per cell): (green rust, ferrihydrite, lepidocrocite, goethite) and
+   * (akaganeite, magnetite, ·, ·), as iron from solution or a dried film; conversions between phases are not in it.
+   */
+  readonly depositA: StorageBufferAttribute
+  readonly depositB: StorageBufferAttribute
   readonly eventCount: StorageBufferAttribute
   /** Per snapshot texel: (iron lost, crust) as halves, phase mix (LP, GT, AK, MG) as bytes. */
   readonly snapshots: StorageBufferAttribute
@@ -269,9 +279,9 @@ export class RustBake {
     const n = grid.resolution
     this.cell = grid.size / n
     this.cells = n * n
-    this.originX = grid.centerX - grid.size / 2
-    this.originZ = grid.centerZ - grid.size / 2
-    this.snapshotSize = n / grid.snapshotDownsample
+    this.originX = -grid.size / 2
+    this.originZ = -grid.size / 2
+    this.snapshotSize = n
     this.snapshotCount = data.snapshotCount
     this.depositCount = Math.max(data.deposits.length / 4, 1)
     this.microCount = Math.max(data.micro.length / 4, 1)
@@ -287,6 +297,8 @@ export class RustBake {
     this.accum = new StorageBufferAttribute(new Uint32Array(this.cells * 4), 1)
     this.labelNext = new StorageBufferAttribute(new Uint32Array(this.cells), 1)
     this.events = vec4Buffer(EVENT_CAPACITY)
+    this.depositA = vec4Buffer(this.cells)
+    this.depositB = vec4Buffer(this.cells)
     this.eventCount = new StorageBufferAttribute(new Uint32Array(4), 1)
     const snapshotTexels = this.snapshotCount * this.snapshotSize * this.snapshotSize
     this.snapshots = new StorageBufferAttribute(new Uint32Array(snapshotTexels * 2), 2)
@@ -372,12 +384,24 @@ export class RustBake {
     return {x, y, world}
   }
 
-  /** Cell index range `[lo, hi]` along one axis covering world `[a, b]`, clamped to the grid. */
+  /** Cell index range `[lo, hi]` along one axis covering world `[a, b]`, unwrapped (it may run past the tile). */
   private span(a: Node<'float'>, b: Node<'float'>, origin: number) {
     const n = this.grid.resolution
-    const lo = maxInt(int(floor(a.sub(origin).div(this.cell))), 0)
-    const hi = minInt(int(floor(b.sub(origin).div(this.cell))), n - 1)
+    const lo = int(floor(a.sub(origin).div(this.cell)))
+    const hi = minInt(int(floor(b.sub(origin).div(this.cell))), lo.add(n - 1))
     return {lo, hi}
+  }
+
+  /** Index of cell `(x, y)`, wrapped onto the tile (from up to a tile outside it). */
+  wrap(x: Node<'int'>, y: Node<'int'>) {
+    const n = this.grid.resolution
+    return y.add(n).mod(n).mul(n).add(x.add(n).mod(n))
+  }
+
+  /** The shortest of `d`'s periodic images (µm): offsets between points of the tile. */
+  private nearest(d: Node<'vec2'>) {
+    const size = this.grid.size
+    return d.sub(floor(d.div(size).add(0.5)).mul(size))
   }
 
   private buildReset(): ComputeNode[] {
@@ -395,6 +419,12 @@ export class RustBake {
       aux.element(i).assign(vec4(0, 0, 1, 0))
       chem.element(i).assign(vec4(7, 1, 0, 0))
     })().compute(this.cells) as ComputeNode
+    const depositA = storage(this.depositA, 'vec4', this.cells)
+    const depositB = storage(this.depositB, 'vec4', this.cells)
+    const deposits = Fn(() => {
+      depositA.element(instanceIndex).assign(vec4(0))
+      depositB.element(instanceIndex).assign(vec4(0))
+    })().compute(this.cells) as ComputeNode
     const rest = Fn(() => {
       const i = int(instanceIndex)
       const {world} = this.cellOf(i)
@@ -404,7 +434,7 @@ export class RustBake {
         atomicStore(eventCount.element(i), uint(0))
       })
     })().compute(this.cells) as ComputeNode
-    return [fields, rest]
+    return [fields, rest, deposits]
   }
 
   private nodes() {
@@ -420,7 +450,7 @@ export class RustBake {
 
   private buildStep(): ComputeNode[] {
     const mg = this.multigrid
-    const list: ComputeNode[] = [this.buildDeposit(), this.buildSmallCaps(), this.buildLargeCaps(), this.buildMicroCaps()]
+    const list: ComputeNode[] = [this.buildSaltLanding(), this.buildSmallCaps(), this.buildLargeCaps(), this.buildMicroCaps()]
     list.push(this.buildFilm(), this.buildLabelCopy())
     const kinetics = this.buildKinetics()
     const potentialOut = this.buildPotentialOut()
@@ -430,22 +460,24 @@ export class RustBake {
       list.push(kinetics, ...mg.coefficientNodes, ...mg.vCycle(POTENTIAL_DIFFUSIVITY))
       list.push(patchTiles, patchTotals, potentialShift, potentialOut)
     }
-    const [speciesTiles, speciesTotals] = this.buildPatchSums(SPECIES_DIFFUSIVITY, true)
-    const speciesShift = this.buildPatchShift(true)
+    // the species' totals are made exact by shifting the drop of each patch, which holds nearly all its volume: a
+    // shift over the whole patch would carry the drop's residual into its thin film, flipping its chemistry
+    const [speciesTiles, speciesTotals] = this.buildPatchSums(SPECIES_DIFFUSIVITY, true, true)
+    const speciesShift = this.buildPatchShift(true, true)
     list.push(this.buildCurrents(), ...this.buildCurrentSums())
     list.push(this.buildTransportSetup(), ...mg.coefficientNodes)
     for (let cycle = 0; cycle < 3; cycle++) list.push(...mg.vCycle(SPECIES_DIFFUSIVITY))
     list.push(speciesTiles, speciesTotals, speciesShift, this.buildSpeciesOut(), this.buildPrecipitate())
     list.push(...this.buildPrecipitateSums(), this.buildPrecipitateScale(), this.buildReact(), this.buildEvents())
+    list.push(this.buildDeposit())
     return list
   }
 
   /** Salt landing this step, spread over each crystal's footprint (fixed point, summed). */
-  private buildDeposit() {
+  private buildSaltLanding() {
     const deposits = storage(this.deposits, 'vec4', this.depositCount)
     const accum = storage(this.accum, 'uint', this.cells * 4).toAtomic()
     const u = this.uniforms
-    const n = this.grid.resolution
     return Fn(() => {
       const d = deposits.element(instanceIndex)
       If(d.w.greaterThan(u.from).and(d.w.lessThanEqual(u.time)).and(abs(d.z).greaterThan(0)), () => {
@@ -457,7 +489,7 @@ export class RustBake {
         const perCell = moles.mul(1e15).div(count.mul(this.cell * this.cell))
         const fixed = uint(perCell.mul(SALT_FIXED).add(0.5))
         Loop({start: zs.lo, end: zs.hi, type: 'int', condition: '<='}, {start: xs.lo, end: xs.hi, type: 'int', condition: '<='}, ({i, j}) => {
-          atomicAdd(accum.element(i.mul(n).add(j).mul(4).add(2)), fixed)
+          atomicAdd(accum.element(this.wrap(j, i).mul(4).add(2)), fixed)
         })
       })
     })().compute(this.depositCount) as ComputeNode
@@ -465,7 +497,6 @@ export class RustBake {
 
   /** Writes a cap (`radius`, `height` at `(cx, cz)`) into the film by atomic max, with `label` (0 = none). */
   private capLoop(accum: AtomicBuffer, cx: Node<'float'>, cz: Node<'float'>, radius: Node<'float'>, height: Node<'float'>, label: Node<'uint'> | null) {
-    const n = this.grid.resolution
     const reach = max(radius, this.cell * 0.5)
     const xs = this.span(cx.sub(reach), cx.add(reach), this.originX)
     const zs = this.span(cz.sub(reach), cz.add(reach), this.originZ)
@@ -477,7 +508,7 @@ export class RustBake {
       const r = vec2(X.sub(cx), Z.sub(cz)).length()
       const h = select(small, select(r.lessThan(this.cell * 0.71), min(average, height), float(0)), capProfile(radius, height, r))
       If(h.greaterThan(0), () => {
-        const cell = i.mul(n).add(j).mul(4)
+        const cell = this.wrap(j, i).mul(4)
         atomicMax(accum.element(cell), floatBitsToUint(h))
         if (label) atomicMax(accum.element(cell.add(1)), label)
       })
@@ -502,7 +533,6 @@ export class RustBake {
   private buildLargeCaps() {
     const large = storage(this.largeDrops, 'vec4', MAX_LARGE_DROPS * 2)
     const accum = storage(this.accum, 'uint', this.cells * 4).toAtomic()
-    const n = this.grid.resolution
     const node = Fn(() => {
       const k = int(workgroupId.x)
       const drop = large.element(k)
@@ -519,9 +549,10 @@ export class RustBake {
           const Z = float(cz).add(0.5).mul(this.cell).add(this.originZ)
           const h = capProfile(radius, drop.w, vec2(X.sub(drop.x), Z.sub(drop.y)).length())
           If(h.greaterThan(0), () => {
-            const cell = cz.mul(n).add(cx).mul(4)
+            const cell = this.wrap(cx, cz).mul(4)
             atomicMax(accum.element(cell), floatBitsToUint(h))
-            atomicMax(accum.element(cell.add(1)), uint(k.add(1)))
+            // + LABELS: a drop's label wins over its microdroplets' (theirs are higher) where they overlap
+            atomicMax(accum.element(cell.add(1)), uint(k.add(1 + LABELS)))
           })
         })
       })
@@ -530,7 +561,7 @@ export class RustBake {
     return node
   }
 
-  /** Microdroplets, wet once their parent's spreading film has reached them. */
+  /** Microdroplets, wet once their parent's spreading film has reached them; those its drop reaches have joined it. */
   private buildMicroCaps() {
     const micro = storage(this.micro, 'vec4', this.microCount)
     const parent = storage(this.microParent, 'uint', this.microCount)
@@ -542,8 +573,10 @@ export class RustBake {
       const m = micro.element(instanceIndex)
       const p = int(parent.element(instanceIndex))
       const film = large.element(p.add(MAX_LARGE_DROPS))
-      If(film.y.greaterThan(0.5).and(m.w.lessThan(film.x)).and(m.z.greaterThan(0)), () => {
-        const radius = m.z.mul(u.microScale)
+      const radius = m.z.mul(u.microScale).toVar()
+      const drop = large.element(p)
+      const apart = this.nearest(m.xy.sub(drop.xy)).length().greaterThan(drop.z.add(radius))
+      If(film.y.greaterThan(0.5).and(m.w.lessThan(film.x)).and(m.z.greaterThan(0)).and(apart), () => {
         this.capLoop(accum, m.x, m.y, radius, radius.mul(tan), uint(p.add(DROPS + 1)))
       })
     })().compute(this.microCount) as ComputeNode
@@ -561,12 +594,12 @@ export class RustBake {
     const labelNext = storage(this.labelNext, 'uint', this.cells)
     const large = storage(this.largeDrops, 'vec4', MAX_LARGE_DROPS * 2)
     const u = this.uniforms
-    const n = this.grid.resolution
     return Fn(() => {
       const i = int(instanceIndex)
       const {x, y, world} = this.cellOf(i)
       const caps = uintBitsToFloat(atomicLoad(accum.element(i.mul(4))))
-      const capLabel = atomicLoad(accum.element(i.mul(4).add(1)))
+      const stored = atomicLoad(accum.element(i.mul(4).add(1)))
+      const capLabel = select(stored.greaterThan(LABELS), stored.sub(LABELS), stored)
       const landed = float(atomicLoad(accum.element(i.mul(4).add(2)))).div(SALT_FIXED)
       atomicStore(accum.element(i.mul(4)), uint(0))
       atomicStore(accum.element(i.mul(4).add(1)), uint(0))
@@ -580,18 +613,23 @@ export class RustBake {
       for (let k = 0; k < MAX_LARGE_DROPS; k++) {
         const drop = large.element(k)
         const film = large.element(k + MAX_LARGE_DROPS)
-        const r = world.sub(drop.xy).length()
+        const r = this.nearest(world.sub(drop.xy)).length()
         const inside = film.y.greaterThan(0.5).and(r.greaterThan(drop.z)).and(r.lessThan(drop.z.add(film.x)))
         If(inside, () => {
           spread.assign(max(spread, smoothstep(drop.z.add(film.x), drop.z.add(film.x.mul(0.85)), r).mul(SPREAD_FILM)))
           spreadLabel.assign(maxUint(spreadLabel, uint(k + DROPS + 1)))
         })
       }
+      // effloresced (the clock's salt is solid): the brine crystallizes where it is, only alkali still holds water
+      const brine = u.liquid.greaterThan(0.5)
+      If(brine.not(), () => {
+        sp.assign(vec4(sp.x, 0, sp.z, sp.w.add(sp.y)))
+      })
       const adsorbed = smoothstep(0.6, 0.95, u.rh).mul(4).add(1).mul(0.003)
       const salty = smoothstep(0, 5, sp.y.add(sp.w))
       const rustWater = min(a.y.mul(0.25), 4).mul(smoothstep(0.55, 0.9, u.rh)).mul(salty.mul(0.65).add(0.35))
       // dissolved salt and alkali hold as much water as the humidity lets them (and salt crust re-deliquesces)
-      const solute = sp.y.add(max(sp.z, 0)).add(select(u.rh.greaterThanEqual(DELIQUESCENCE_RH), sp.w, float(0)))
+      const solute = select(brine, sp.y.add(max(sp.z, 0)).add(select(u.rh.greaterThanEqual(DELIQUESCENCE_RH), sp.w, float(0))), max(sp.z, 0))
       const hygroscopic = min(solute.div(max(u.soluteMolarity, 0.5)), 20)
       const cap = caps as unknown as Node<'float'>
       // a drop's cap is its shape (its thin edge as thick as its solute keeps it); outside drops, films are as thick as
@@ -604,7 +642,7 @@ export class RustBake {
         const dissolve = min(sp.w, max(h.mul(MAX_LIQUID).sub(sp.y), 0)).toVar()
         sp.assign(vec4(sp.x, sp.y.add(dissolve), sp.z, sp.w.sub(dissolve)))
       }).Else(() => {
-        sp.assign(vec4(sp.x, 0, 0, sp.w.add(sp.y)))
+        sp.assign(vec4(sp.x, 0, sp.z, sp.w.add(sp.y)))
       })
       species.element(i).assign(sp)
 
@@ -612,17 +650,14 @@ export class RustBake {
       const kappa = max(float(8.5).mul(ionic).div(ionic.mul(0.15).add(1)), select(spread.greaterThan(0), float(0.5), float(0)))
       const kappaH = select(wet, kappa.mul(h), float(0)).toVar()
 
-      // a cap's label, else the spreading film's, else (brine-wet rust) a neighbour's drop patch, or its own
+      // a cap's label, else the spreading film's, else (brine-wet rust, hygroscopic films) a wet neighbour's label of
+      // the same kind (next to a drop it joins the drop, next to a film the passive film), or its own
       const label = select(uint(capLabel).greaterThan(0), uint(capLabel), spreadLabel).toVar()
       If(label.equal(uint(0)).and(wet), () => {
-        const own = (value: Node<'float'>) => {
-          const l = uint(value)
-          return select(l.greaterThan(0), l.sub(1).mod(DROPS).add(1), uint(0))
-        }
-        const neighbour = (di: Node<'int'>, ok: Node<'bool'>) => select(ok, own(aux.element(select(ok, di, i)).w), uint(0))
-        label.assign(maxUint(maxUint(neighbour(i.add(1), x.lessThan(n - 1)), neighbour(i.sub(1), x.greaterThan(0))),
-          maxUint(neighbour(i.add(n), y.lessThan(n - 1)), neighbour(i.sub(n), y.greaterThan(0)))))
-        label.assign(maxUint(label, own(a.w)))
+        const neighbour = (di: Node<'int'>) => uint(aux.element(di).w)
+        label.assign(maxUint(maxUint(neighbour(this.wrap(x.add(1), y)), neighbour(this.wrap(x.sub(1), y))),
+          maxUint(neighbour(this.wrap(x, y.add(1))), neighbour(this.wrap(x, y.sub(1))))))
+        label.assign(maxUint(label, uint(a.w)))
       })
       labelNext.element(i).assign(select(wet, label, uint(0)))
       const e = electro.element(i).toVar()
@@ -697,14 +732,13 @@ export class RustBake {
    */
   private couplings(aux: ReturnType<RustBake['nodes']>['aux'], i: Node<'int'>, x: Node<'int'>, y: Node<'int'>,
     value: (j: Node<'int'>) => Node<'float'>, electrical: boolean) {
-    const n = this.grid.resolution
     const patch = (l: Node<'float'>) => electrical ? patchOf(l) : int(l)
     const label = patch(aux.element(i).w)
-    const east = select(x.lessThan(n - 1), i.add(1), i)
-    const north = select(y.lessThan(n - 1), i.add(n), i)
-    const coupled = (j: Node<'int'>, ok: Node<'bool'>) => ok.and(label.greaterThan(0)).and(patch(aux.element(j).w).equal(label))
-    const aE = select(coupled(east, x.lessThan(n - 1)), harmonic(value(i), value(east)), float(0))
-    const aN = select(coupled(north, y.lessThan(n - 1)), harmonic(value(i), value(north)), float(0))
+    const east = this.wrap(x.add(1), y)
+    const north = this.wrap(x, y.add(1))
+    const coupled = (j: Node<'int'>) => label.greaterThan(0).and(patch(aux.element(j).w).equal(label))
+    const aE = select(coupled(east), harmonic(value(i), value(east)), float(0))
+    const aN = select(coupled(north), harmonic(value(i), value(north)), float(0))
     return {aE, aN}
   }
 
@@ -747,7 +781,8 @@ export class RustBake {
    * Sums `value` (a vec4 and a scalar per cell) over each patch label of the grid in two passes: tiles of `TILE` cells
    * into partial sums per label, then each label's partials, into `out` as `(Σ vector, (Σ scalar, ·, ·, ·))` per label.
    */
-  private buildLabelSums(value: (i: Node<'int'>, x: Node<'int'>, y: Node<'int'>) => {v: Node<'vec4'>; b: Node<'float'>},
+  private buildLabelSums(
+    value: (i: Node<'int'>, x: Node<'int'>, y: Node<'int'>, aux: ReturnType<RustBake['nodes']>['aux']) => {v: Node<'vec4'>; b: Node<'float'>},
     out: StorageBufferAttribute, electrical: boolean): [ComputeNode, ComputeNode] {
     const slots = electrical ? DROPS : LABELS
     const {aux} = this.nodes()
@@ -761,7 +796,7 @@ export class RustBake {
       const lane = int(localId.x)
       const i = int(workgroupId.x).mul(TILE).add(lane)
       const label = electrical ? patchOf(aux.element(i).w) : int(aux.element(i).w)
-      const sample = value(i, i.mod(n), i.div(n))
+      const sample = value(i, i.mod(n), i.div(n), aux)
       const v = sample.v.toVar()
       const b = sample.b.toVar()
       for (let l = 1; l <= slots; l++) {
@@ -817,12 +852,12 @@ export class RustBake {
   }
 
   /** Each patch's residual `F − A u` and `B`, for the exact correction of its mean. */
-  private buildPatchSums(d: Diffusivity, electrical: boolean): [ComputeNode, ComputeNode] {
+  private buildPatchSums(d: Diffusivity, electrical: boolean, dropsOnly = false): [ComputeNode, ComputeNode] {
     const mg = this.multigrid
     const level = mg.levels[0]
-    return this.buildLabelSums((i, x, y) => ({
+    return this.buildLabelSums((i, x, y, aux) => ({
       v: mg.nodes.f.element(i).sub(mg.apply(i, x, y, level, d)),
-      b: mg.nodes.k.element(i).z,
+      b: dropsOnly ? mg.nodes.k.element(i).z.mul(float(aux.element(i).w.lessThan(DROPS + 0.5))) : mg.nodes.k.element(i).z,
     }), this.patches, electrical)
   }
 
@@ -854,14 +889,15 @@ export class RustBake {
   }
 
   /** Shifts each labelled patch's solution by its summed residual over its summed `B`: its mean becomes exact. */
-  private buildPatchShift(electrical: boolean) {
+  private buildPatchShift(electrical: boolean, dropsOnly = false) {
     const {aux} = this.nodes()
     const {u} = this.multigrid.nodes
     const patches = storage(this.patches, 'vec4', LABELS * 2)
     return Fn(() => {
       const i = int(instanceIndex)
       const label = electrical ? patchOf(aux.element(i).w) : int(aux.element(i).w)
-      If(label.greaterThan(0), () => {
+      const shifted = dropsOnly ? label.greaterThan(0).and(aux.element(i).w.lessThan(DROPS + 0.5)) : label.greaterThan(0)
+      If(shifted, () => {
         const slot = label.sub(1).mul(2)
         const b = patches.element(slot.add(1)).x
         If(b.greaterThan(1e-30), () => {
@@ -942,82 +978,93 @@ export class RustBake {
   }
 
   /**
-   * Fe(OH)₂ precipitation in the fast-reaction limit. Fe²⁺ and OH⁻ cannot coexist, and a step (minutes) is long
-   * against diffusion across a drop (seconds): precipitating where the transport mixed them would spread the rust over
-   * the whole drop. Each cell's own mix precipitates `m = min(Fe²⁺, max(alkalinity, 0)/2)` (acid precipitates nothing),
-   * which leaves its solution as the limit does; but where that happened is the source whose backward-Euler image is
-   * `m`: `P = (B + L)·m`, `B + L` the transport's operator. That is at the anodes in an alkaline drop, at the cathodes
-   * in an Fe²⁺-rich one, and on the front between (the Evans ring). Exactly solved it is never negative; the solver's
-   * residuals make it so in places, which are clamped, and `buildPrecipitateScale` scales each patch's precipitate to
-   * the Fe²⁺ that left its solution. The amount (M·µm) goes to the reactions in `u.w`.
+   * Fe(OH)₂ precipitation in the fast-reaction limit. Fe²⁺ and OH⁻ cannot coexist, and a step (minutes) is long against
+   * diffusion across a drop (seconds), so each step reaches the quasi-steady state: `ψ = Fe²⁺ − alkalinity/2`, which
+   * precipitation leaves as it is, diffuses with the electrode sources. Where `ψ > 0` the solution holds Fe²⁺ and the
+   * OH⁻ the cathodes make there precipitates in place; where `ψ < 0` it holds alkalinity and the Fe²⁺ the anodes make
+   * there precipitates in place; and what diffuses across the front `ψ = 0` precipitates on it (`D k |Δψ|` through
+   * each face it crosses, shared by how near it runs to either cell): at the anodes of an alkaline drop, at the
+   * cathodes of an Fe²⁺-rich one, and where a drop's Fe²⁺ meets the alkaline film around it (the Evans ring). Only
+   * faces within `FRONT_REACH` of a drop's edge count: farther out in the thin film the flux is the solve's error times a
+   * large conductance, not iron (what it would have placed forms where the mix is). How much
+   * precipitates is exact: each cell's own mix after the transport, `min(Fe²⁺, alkalinity/2)`, which leaves its
+   * solution as the limit does; `buildPrecipitateScale` places each patch's total by these estimates. (The place cannot
+   * come from the transport's operator applied to that mix, the source whose image it is: at `D dt/dx² ~ 10⁵` that
+   * amplifies the solve's rounding into a checkerboard of hot spots.) The estimate and the mix (M·µm) go to `f`.
    */
   private buildPrecipitate() {
     const {electro, species} = this.nodes()
-    const {u, k} = this.multigrid.nodes
-    const n = this.grid.resolution
-    const area = this.cell * this.cell
-    const D = SPECIES_DIFFUSIVITY[0]
+    const {u, f, k} = this.multigrid.nodes
+    const large = storage(this.largeDrops, 'vec4', MAX_LARGE_DROPS * 2)
+    const dt = this.uniforms.dt
+    const D = SPECIES_DIFFUSIVITY[0] / (this.cell * this.cell)
     return Fn(() => {
       const i = int(instanceIndex)
-      const {x, y} = this.cellOf(i)
-      // from the transported concentrations (`u`, whose xyz this pass leaves as they are): no cell reads what another writes
-      const mixed = (j: Node<'int'>) => {
-        const c = u.element(j)
-        return select(electro.element(j).x.greaterThan(WET_FILM), min(max(c.x, 0), max(c.z, 0).mul(0.5)), float(0))
-      }
-      const h = electro.element(i).x
+      const {x, y, world} = this.cellOf(i)
+      const e = electro.element(i).toVar()
+      const h = e.x
       If(h.greaterThan(WET_FILM), () => {
         const film = max(h, 1e-6)
         const sp = species.element(i).toVar()
+        // from the transported concentrations (`u`, whose xyz this pass leaves as they are): no cell reads what another writes
         const c = u.element(i).toVar()
         const own = min(max(c.x, 0), max(c.z, 0).mul(0.5)).toVar()
+        const nearDrop = float(0).toVar()
+        for (let d = 0; d < MAX_LARGE_DROPS; d++) {
+          const drop = large.element(d)
+          const within = drop.z.greaterThan(0).and(this.nearest(world.sub(drop.xy)).length().lessThan(drop.z.add(FRONT_REACH)))
+          nearDrop.assign(max(nearDrop, float(within)))
+        }
+        const psi = c.x.sub(c.z.mul(0.5)).toVar()
         const kc = k.element(i)
-        const hasW = x.greaterThan(0)
-        const hasS = y.greaterThan(0)
+        const west = this.wrap(x.sub(1), y)
+        const south = this.wrap(x, y.sub(1))
         const faces: [Node<'int'>, Node<'float'>][] = [
-          [select(x.lessThan(n - 1), i.add(1), i), kc.x],
-          [select(hasW, i.sub(1), i), select(hasW, k.element(select(hasW, i.sub(1), i)).x, float(0))],
-          [select(y.lessThan(n - 1), i.add(n), i), kc.y],
-          [select(hasS, i.sub(n), i), select(hasS, k.element(select(hasS, i.sub(n), i)).y, float(0))],
+          [this.wrap(x.add(1), y), kc.x], [west, k.element(west).x], [this.wrap(x, y.add(1)), kc.y], [south, k.element(south).y],
         ]
-        let flow = float(0) as Node<'float'>
-        for (const [j, coefficient] of faces) flow = flow.add(own.sub(mixed(j)).mul(coefficient))
-        const precipitated = own.mul(film).add(flow.mul(D / area))
+        // what crosses the front through each face (a coefficient is 0 out of the patch), this cell's share of it
+        let flux = float(0) as Node<'float'>
+        for (const [j, coefficient] of faces) {
+          const cj = u.element(j)
+          const other = cj.x.sub(cj.z.mul(0.5))
+          const share = abs(other).div(abs(psi).add(abs(other)).add(1e-30))
+          flux = flux.add(select(psi.mul(other).lessThan(0), coefficient.mul(abs(psi.sub(other))).mul(share), float(0)))
+        }
+        const inPlace = select(psi.greaterThan(0), e.w.mul(ALKALINITY_PER_CATHODIC * 0.5), e.z.mul(FERROUS_PER_ANODIC)).mul(dt)
         species.element(i).assign(vec4(max(c.x, 0).sub(own).mul(film), sp.y, c.z.sub(own.mul(2)).mul(film), sp.w))
-        u.element(i).assign(vec4(c.xyz, max(precipitated, 0)))
+        f.element(i).assign(vec4(inPlace.add(flux.mul(D).mul(nearDrop)), 0, own.mul(film), 0))
+        u.element(i).assign(vec4(c.xyz, own.mul(film)))
+      }).Else(() => {
+        f.element(i).assign(vec4(0))
       })
     })().compute(this.cells) as ComputeNode
   }
 
-  /** Each patch's precipitate as computed, and the Fe²⁺ that actually left its solution, for `buildPrecipitateScale`. */
+  /** Each patch's precipitate estimate and its total, for `buildPrecipitateScale`. */
   private buildPrecipitateSums(): [ComputeNode, ComputeNode] {
-    const {electro, species} = this.nodes()
-    const {u} = this.multigrid.nodes
-    return this.buildLabelSums(i => {
-      const h = electro.element(i).x
-      const c = u.element(i)
-      const wet = float(h.greaterThan(WET_FILM))
-      const left = max(c.x, 0).mul(h).sub(max(species.element(i).x, 0))
-      return {v: vec4(c.w, left, 0, 0).mul(wet), b: float(0)}
-    }, this.patches, true)
+    const {f} = this.multigrid.nodes
+    return this.buildLabelSums(i => ({v: f.element(i), b: float(0)}), this.patches, true)
   }
 
   /**
-   * Scales each patch's precipitate to the Fe²⁺ that left its solution: the settled state is only as exact as the
-   * transport's solve, and a residual would otherwise make or lose iron. The front-weighted shape stays.
+   * Places each patch's precipitate by the estimates (scaled down when they come to more than its total); what they
+   * miss (the old solution mixing as the patch changed) forms where the mix was. A cell in no patch keeps its own mix
+   * (nothing moved there).
    */
   private buildPrecipitateScale() {
     const {aux} = this.nodes()
-    const {u} = this.multigrid.nodes
+    const {u, f} = this.multigrid.nodes
     const patches = storage(this.patches, 'vec4', LABELS * 2)
     return Fn(() => {
       const i = int(instanceIndex)
       const patch = patchOf(aux.element(i).w)
       If(patch.greaterThan(0), () => {
-        const sums = patches.element(patch.sub(1).mul(2))
-        const scale = select(sums.x.greaterThan(1e-12), max(sums.y, 0).div(sums.x), float(1))
+        const sums = patches.element(patch.sub(1).mul(2)).toVar()
+        const terms = f.element(i).toVar()
+        const estimated = min(sums.z.div(max(sums.x, 1e-30)), 1).toVar()
+        const missed = max(sums.z.sub(sums.x.mul(estimated)), 0).div(max(sums.z, 1e-30))
         const c = u.element(i).toVar()
-        u.element(i).assign(vec4(c.xyz, c.w.mul(scale)))
+        u.element(i).assign(vec4(c.xyz, terms.x.mul(estimated).add(terms.z.mul(missed))))
       })
     })().compute(this.cells) as ComputeNode
   }
@@ -1026,12 +1073,13 @@ export class RustBake {
    * The reactions of a step: the precipitated Fe(OH)₂ (from `buildPrecipitate`) becomes green rust, ferrihydrite or
    * lepidocrocite by local conditions, dissolved Fe²⁺ oxygenates (Stumm–Lee) into the phase its pH and chloride
    * select, green rust and lepidocrocite turn to magnetite without O₂, the young phases age, rust's Fe(II) reduced on
-   * wetting re-oxidizes, the iron is lost (Faraday). What each phase grew goes to `buildEvents` in `f`. Every
+   * wetting re-oxidizes, the iron is lost (Faraday). The fresh iron per phase goes to `f` (GR, FH, LP, GT) and `u` (AK,
+   * MG, and the lepidocrocite and magnetite converted from other phases) for `buildEvents` and the deposit. Every
    * intermediate is a variable: TSL re-emits expressions where they are used, which would read species after they changed.
    */
   private buildReact() {
     const {electro, species, aux, solidA, solidB, chem} = this.nodes()
-    const {u: solution, f: grownOut} = this.multigrid.nodes
+    const {u: solution, f: freshOut} = this.multigrid.nodes
     const u = this.uniforms
     return Fn(() => {
       const i = int(instanceIndex)
@@ -1044,7 +1092,8 @@ export class RustBake {
       const dt = u.dt
       const h = e.x
       const wet = h.greaterThan(WET_FILM)
-      const grown = vec4(0).toVar()
+      const fresh = vec4(0).toVar()
+      const freshMore = vec4(0).toVar()
 
       If(wet, () => {
         const film = max(h, 1e-6).toVar()
@@ -1059,26 +1108,29 @@ export class RustBake {
         const oxygen = clamp(float(1).sub(e.w.div(limit.add(1e-9))), 0, 1).toVar()
 
         // the precipitated Fe(OH)2 (and ferrous salt past its solubility): green rust where O2 is short, else oxidized
+        // FeCl2 past saturation crystallizes and oxidizes (akaganeite in its acid chloride), releasing oxygenation's acid
         const salted = max(ferrous0.sub(MAX_FERROUS), 0).toVar()
-        const precipitated = solution.element(i).w.div(film).add(salted).toVar()
+        const precipitated = solution.element(i).w.div(film).toVar()
         const toGreen = smoothstep(0.6, 0.2, oxygen).mul(smoothstep(0.02, 0.2, chloride0)).toVar()
-        const toFerrihydrite = smoothstep(0.02, 0.2, precipitated).mul(float(1).sub(toGreen)).toVar()
+        // green rust holds a Cl- per four iron: no more forms than the chloride there allows
+        const greenFormed = min(precipitated.mul(toGreen), chloride0.mul(4)).toVar()
+        const rest = precipitated.sub(greenFormed).toVar()
+        const toFerrihydrite = smoothstep(0.02, 0.2, precipitated).toVar()
         const ferrous1 = ferrous0.sub(salted).toVar()
 
         // Stumm-Lee oxygenation of what stays dissolved; its phase by local conditions
         const rate = hydroxide.mul(hydroxide).mul(oxygen.mul(0.21).mul(salting)).mul(STUMM_LEE_K)
-        const oxidized = ferrous1.mul(float(1).sub(exp(rate.mul(dt).negate()))).toVar()
+        const oxidized = ferrous1.mul(float(1).sub(exp(rate.mul(dt).negate()))).add(salted).toVar()
         const wAkaganeite = smoothstep(0.3, 1.5, chloride0).mul(smoothstep(6.0, 4.5, pH)).toVar()
         const wGoethite = smoothstep(6.8, 5.2, pH).mul(float(1).sub(wAkaganeite)).toVar()
         const wFerrihydrite = smoothstep(0.02, 0.2, ferrous1).mul(smoothstep(7.2, 8.2, pH))
           .mul(max(float(1).sub(wAkaganeite).sub(wGoethite), 0)).toVar()
         const wLepidocrocite = max(float(1).sub(wAkaganeite).sub(wGoethite).sub(wFerrihydrite), 0).toVar()
-        const ferrous2 = ferrous1.sub(oxidized).toVar()
+        const ferrous2 = ferrous0.sub(oxidized).toVar()
 
-        const green = precipitated.mul(toGreen).mul(toIron).toVar()
-        const ferrihydrite = precipitated.mul(float(1).sub(toGreen)).mul(toFerrihydrite).add(oxidized.mul(wFerrihydrite)).mul(toIron).toVar()
-        const lepidocrocite = precipitated.mul(float(1).sub(toGreen)).mul(float(1).sub(toFerrihydrite))
-          .add(oxidized.mul(wLepidocrocite)).mul(toIron).toVar()
+        const green = greenFormed.mul(toIron).toVar()
+        const ferrihydrite = rest.mul(toFerrihydrite).add(oxidized.mul(wFerrihydrite)).mul(toIron).toVar()
+        const lepidocrocite = rest.mul(float(1).sub(toFerrihydrite)).add(oxidized.mul(wLepidocrocite)).mul(toIron).toVar()
         const goethite = oxidized.mul(wGoethite).mul(toIron).toVar()
         const akaganeite = oxidized.mul(wAkaganeite).mul(toIron).toVar()
 
@@ -1092,12 +1144,9 @@ export class RustBake {
         const ferrous3 = ferrous2.sub(toMagnetite.div(toIron)).toVar()
         // green rust takes a Cl- per four iron for an OH- (Fe(OH)2 to [Fe(II)3Fe(III)(OH)8]Cl) and gives both back as it
         // converts; oxygenation and magnetite formation release two H+ per Fe2+ (the anode acidifies, Fe2+ stays dissolved)
-        const greenFormed = precipitated.mul(toGreen).toVar()
         const greenConverted = greenToLepidocrocite.add(greenToMagnetite).div(toIron).toVar()
         const alkalinity1 = alkalinity0.sub(oxidized.add(toMagnetite.div(toIron)).mul(2))
           .add(greenFormed.sub(greenConverted).mul(0.25)).toVar()
-        const carbonated = select(alkalinity1.greaterThan(CARBONATED_ALKALINITY),
-          alkalinity1.sub(CARBONATED_ALKALINITY).mul(exp(dt.div(-CARBONATION_TIME))).add(CARBONATED_ALKALINITY), alkalinity1).toVar()
         const chloride1 = chloride0.sub(greenFormed.sub(greenConverted).mul(0.25)).toVar()
         const crystallized = max(chloride1.sub(MAX_LIQUID), 0).toVar()
         // aging while wet: ferrihydrite and (slowly) lepidocrocite to goethite
@@ -1122,9 +1171,10 @@ export class RustBake {
         sA.assign(max(nextA, vec4(0)))
         sB.assign(max(nextB, vec4(0)))
         sp.assign(vec4(max(ferrous3, 0).mul(film), max(chloride1.sub(crystallized), 0).mul(film),
-          carbonated.mul(film), sp.w.add(crystallized.mul(film))))
-        grown.assign(vec4(lepidocrocite.add(greenToLepidocrocite), goethite, akaganeite, greenToMagnetite.add(toMagnetite.mul(3))))
-        c.assign(vec4(filmPH(carbonated, max(ferrous3, 0)), oxygen, c.z, c.w))
+          alkalinity1.mul(film), sp.w.add(crystallized.mul(film))))
+        fresh.assign(vec4(green, ferrihydrite, lepidocrocite, goethite))
+        freshMore.assign(vec4(akaganeite, toMagnetite, greenToLepidocrocite, greenToMagnetite.add(toMagnetite.mul(2))))
+        c.assign(vec4(filmPH(alkalinity1, max(ferrous3, 0)), oxygen, c.z, c.w))
       }).Else(() => {
         // a dried film: its Fe2+ oxidizes in air (lepidocrocite, some ferrihydrite), green rust too; rust's Fe(II) re-oxidizes
         const iron = max(sp.x, 0).mul(IRON_UM_PER_MOLAR_UM).toVar()
@@ -1134,21 +1184,36 @@ export class RustBake {
         const nextB = vec4(sB.x, sB.y.add(reoxidized.mul(0.1)), sB.z.sub(reoxidized), sB.w).toVar()
         sA.assign(max(nextA, vec4(0)))
         sB.assign(max(nextB, vec4(0)))
-        sp.assign(vec4(0, sp.y, 0, sp.w.add(airGreen.div(IRON_UM_PER_MOLAR_UM).mul(0.25))))
-        grown.assign(vec4(iron.mul(0.7).add(airGreen), 0, 0, 0))
+        const greenFreed = airGreen.div(IRON_UM_PER_MOLAR_UM).mul(0.25)
+        sp.assign(vec4(0, sp.y, sp.z.sub(max(sp.x, 0).mul(2)).sub(greenFreed), sp.w.add(greenFreed)))
+        fresh.assign(vec4(0, iron.mul(0.3), iron.mul(0.7), 0))
+        freshMore.assign(vec4(0, 0, airGreen, 0))
         c.assign(vec4(7, 1, 0, c.w))
       })
 
       const crust = sA.x.mul(LP.greenRust).add(sA.y.mul(LP.ferrihydrite)).add(sA.z.mul(LP.lepidocrocite))
         .add(sA.w.mul(LP.goethite)).add(sB.x.mul(LP.akaganeite)).add(sB.y.mul(LP.magnetite)).toVar()
       const dense = sB.y.mul(LP.magnetite).add(sA.w.mul(LP.goethite))
-      const cover = float(1).div(dense.div(3).add(1)).toVar()
+      const cover = float(1).div(dense.div(10).add(1)).toVar()
       solidA.element(i).assign(sA)
       solidB.element(i).assign(sB)
       species.element(i).assign(sp)
       aux.element(i).assign(vec4(a.x, crust, cover, a.w))
       chem.element(i).assign(vec4(c.x, c.y, c.z, max(sA.z.sub(sB.z), 0)))
-      grownOut.element(i).assign(grown)
+      freshOut.element(i).assign(fresh)
+      solution.element(i).assign(freshMore)
+    })().compute(this.cells) as ComputeNode
+  }
+
+  /** Adds this step's fresh rust per phase (from `buildReact`) to the deposit the volume grows from. */
+  private buildDeposit() {
+    const {f: freshIn, u: moreIn} = this.multigrid.nodes
+    const depositA = storage(this.depositA, 'vec4', this.cells)
+    const depositB = storage(this.depositB, 'vec4', this.cells)
+    return Fn(() => {
+      const i = int(instanceIndex)
+      depositA.element(i).addAssign(freshIn.element(i))
+      depositB.element(i).addAssign(vec4(moreIn.element(i).xy, 0, 0))
     })().compute(this.cells) as ComputeNode
   }
 
@@ -1157,7 +1222,7 @@ export class RustBake {
    * as likely as the iron that phase grew this step, `NUCLEATION` clusters per µm² per µm of iron.
    */
   private buildEvents() {
-    const {f: grownIn} = this.multigrid.nodes
+    const {f: freshIn, u: moreIn} = this.multigrid.nodes
     const events = storage(this.events, 'vec4', EVENT_CAPACITY)
     const eventCount = storage(this.eventCount, 'uint', 4).toAtomic()
     const u = this.uniforms
@@ -1165,8 +1230,10 @@ export class RustBake {
     return Fn(() => {
       const i = int(instanceIndex)
       const {world} = this.cellOf(i)
-      const grown = grownIn.element(i).toVar()
-      const amounts = [grown.x, grown.y, grown.z, grown.w]
+      const fresh = freshIn.element(i).toVar()
+      const more = moreIn.element(i).toVar()
+      // grown this step: lepidocrocite, goethite, akaganeite, magnetite (fresh or converted)
+      const amounts = [fresh.z.add(more.z), fresh.w, more.x, more.y.add(more.w)]
       amounts.forEach((amount, k) => {
         const phase = k + 1
         const expected = amount.mul(NUCLEATION[phase] * cellArea)
@@ -1184,43 +1251,28 @@ export class RustBake {
     })().compute(this.cells) as ComputeNode
   }
 
-  /** Iron lost, crust and phase mix, averaged over each snapshot texel, into the layer `snapshotLayer` (if ≥ 0). */
+  /** Iron lost, crust and phase mix of each cell into the layer `snapshotLayer` (if ≥ 0). */
   private buildSnapshot() {
     const solidA = storage(this.solidA, 'vec4', this.cells)
     const solidB = storage(this.solidB, 'vec4', this.cells)
     const snapshots = storage(this.snapshots, 'uvec2', this.snapshotCount * this.snapshotSize * this.snapshotSize)
     const u = this.uniforms
     const m = this.snapshotSize
-    const ds = this.grid.snapshotDownsample
-    const n = this.grid.resolution
     return Fn(() => {
       If(u.snapshotLayer.greaterThanEqual(0), () => {
         const t = int(instanceIndex)
-        const sx = t.mod(m)
-        const sy = t.div(m)
-        const loss = float(0).toVar()
-        const phases = vec4(0).toVar()
-        const crust = float(0).toVar()
-        for (let dy = 0; dy < ds; dy++) {
-          for (let dx = 0; dx < ds; dx++) {
-            const i = sy.mul(ds).add(dy).mul(n).add(sx.mul(ds).add(dx))
-            const a = solidA.element(i)
-            const b = solidB.element(i)
-            loss.addAssign(b.w)
-            const lp = a.z.mul(LP.lepidocrocite)
-            const gt = a.w.mul(LP.goethite)
-            const ak = b.x.mul(LP.akaganeite)
-            const mg = b.y.mul(LP.magnetite)
-            phases.addAssign(vec4(lp, gt, ak, mg))
-            crust.addAssign(lp.add(gt).add(ak).add(mg).add(a.x.mul(LP.greenRust)).add(a.y.mul(LP.ferrihydrite)))
-          }
-        }
-        const count = ds * ds
-        const mix4 = phases.div(max(crust, 1e-6))
+        const a = solidA.element(t)
+        const b = solidB.element(t)
+        const lp = a.z.mul(LP.lepidocrocite)
+        const gt = a.w.mul(LP.goethite)
+        const ak = b.x.mul(LP.akaganeite)
+        const mg = b.y.mul(LP.magnetite)
+        const crust = lp.add(gt).add(ak).add(mg).add(a.x.mul(LP.greenRust)).add(a.y.mul(LP.ferrihydrite)).toVar()
+        const mix4 = vec4(lp, gt, ak, mg).div(max(crust, 1e-6))
         const byte = (v: Node<'float'>) => uint(clamp(v, 0, 1).mul(255).add(0.5))
         const packed = byte(mix4.x).bitOr(byte(mix4.y).shiftLeft(8)).bitOr(byte(mix4.z).shiftLeft(16)).bitOr(byte(mix4.w).shiftLeft(24))
         const index = u.snapshotLayer.mul(m * m).add(t)
-        const halves = packHalf2x16(vec2(loss.div(count), crust.div(count))) as unknown as Node<'uint'>
+        const halves = packHalf2x16(vec2(b.w, crust)) as unknown as Node<'uint'>
         snapshots.element(index).assign(uvec2(halves, packed))
       })
     })().compute(m * m) as ComputeNode
