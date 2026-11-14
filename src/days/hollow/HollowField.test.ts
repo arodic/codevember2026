@@ -1,11 +1,39 @@
 import { describe, it, expect } from 'vitest'
-import { BufferAttribute, Vector3 } from 'three/webgpu'
-import { HollowField, RIMSTONE_LIP_HEIGHT, RIMSTONE_POOL_STEP } from './HollowField.js'
-import { buildHollowLakeGeometry, buildHollowShellGeometry, buildRimstonePoolGeometry } from './HollowShell.js'
-import { buildHollowRocks } from './HollowRocks.js'
+import { BufferAttribute, BufferGeometry, Vector3 } from 'three/webgpu'
+import { HOLLOW_MAX, HollowField, RIMSTONE_LIP_HEIGHT, RIMSTONE_POOL_STEP } from './HollowField.js'
+import { buildHollowLakeGeometry, buildRimstonePoolGeometry } from './HollowLake.js'
+import { placeHollowRocks } from './HollowRocks.js'
 import { buildHollowSpeleothems } from './HollowSpeleothems.js'
+import { HollowSculpt } from './HollowSculpt.js'
+import { HollowSculptPool } from './HollowSculptPool.js'
+import { scheduleHollowDrops } from './HollowWater.js'
 
-describe('Hollow Phase 1 — Karst SDF, Surface Nets Shell & Speleothems', () => {
+const SEEDS = [1056, 7, 41, 908, 1337, 42, 777, 2501]
+
+/** Edges bordering an odd number of triangles (thin features may pinch 4), except at the skylight mouth. */
+function openEdges(geometry: BufferGeometry) {
+  const pos = geometry.getAttribute('position')
+  const idx = geometry.getIndex()!
+  const edgeUse = new Map<number, number>()
+  const n = pos.count
+  for (let i = 0; i < idx.count; i += 3) {
+    for (let e = 0; e < 3; e++) {
+      const a = idx.getX(i + e)
+      const b = idx.getX(i + (e + 1) % 3)
+      const key = Math.min(a, b) * n + Math.max(a, b)
+      edgeUse.set(key, (edgeUse.get(key) ?? 0) + 1)
+    }
+  }
+  let open = 0
+  for (const [key, uses] of edgeUse) {
+    if (uses % 2 === 0) continue
+    if (Math.min(pos.getY(Math.floor(key / n)), pos.getY(key % n)) > HOLLOW_MAX.y - 0.5) continue
+    open++
+  }
+  return open
+}
+
+describe('Hollow — karst SDF, sculpted cave & speleothems', () => {
   it('sculpts an open cavern corridor, open skylight chimney, stepped rimstone dam, and behind-camera fire alcove', () => {
     const field = new HollowField({seed: 1056})
     const pose = field.cinemaPose
@@ -59,8 +87,7 @@ describe('Hollow Phase 1 — Karst SDF, Surface Nets Shell & Speleothems', () =>
 
   it('reshuffles major composition landmarks across seeds for widescreen seed-hunting', () => {
     // Include default demo seed 1056 among a spread of unrelated seeds (no single-seed overfitting)
-    const seeds = [1056, 7, 41, 908, 1337, 42, 777, 2501]
-    const fields = seeds.map(seed => new HollowField({seed}))
+    const fields = SEEDS.map(seed => new HollowField({seed}))
 
     const landmarkSpread = (fs: HollowField[]) => {
       const spines = fs.map(f => f.spineX(-6))
@@ -90,10 +117,11 @@ describe('Hollow Phase 1 — Karst SDF, Surface Nets Shell & Speleothems', () =>
     const heroSides = new Set(fields.map(f => f.heroSide))
     expect(heroSides.size).toBe(2)
     const rimSigns = new Set(fields.map(f => Math.sign(f.rimstoneCenter.x - f.cinemaPose.startX) || 1))
-    expect(rimSigns.size).toBeGreaterThanOrEqual(1)
+    expect(rimSigns.size).toBe(2)
 
-    // Every seed keeps fire well behind its own cinema camera plane
+    // Every seed keeps fire well behind its own cinema camera plane, and its camera looks into the cavern, not a wall
     for (const field of fields) {
+      expect(field.viewClearance()).toBeGreaterThan(0.9)
       const pose = field.cinemaPose
       const cam = new Vector3(pose.startX, pose.height, pose.startZ)
       const look = new Vector3(pose.targetX, pose.targetY, pose.targetZ).sub(cam).normalize()
@@ -102,80 +130,214 @@ describe('Hollow Phase 1 — Karst SDF, Surface Nets Shell & Speleothems', () =>
     }
   })
 
-  it('extracts a manifold Surface Nets shell with inward-into-air FrontSide winding and matching lake/rimstone meshes', () => {
-    const field = new HollowField({seed: 1056})
-    const shell = buildHollowShellGeometry(field, 66, 36, 88)
-    const pos = shell.getAttribute('position') as BufferAttribute
-    const norm = shell.getAttribute('normal') as BufferAttribute
-    const idx = shell.getIndex()!
+  it('fits the lake and rimstone pool meshes to every seed\'s own lake and dam', () => {
+    for (const seed of SEEDS) {
+      const field = new HollowField({seed})
+      const lake = buildHollowLakeGeometry(field, 0.4)
+      expect(lake.getIndex()!.count).toBeGreaterThan(300)
+      const box = lake.boundingBox!
+      // Every patch of deep open water is covered by the lake mesh
+      const e = field.lakeExtent
+      for (let z = e.minZ; z <= e.maxZ; z += 0.5) {
+        for (let x = e.minX; x <= e.maxX; x += 0.5) {
+          if (field.lakeDepthAt(x, z) < 0.3) continue
+          expect(x).toBeGreaterThanOrEqual(box.min.x - 1e-3)
+          expect(x).toBeLessThanOrEqual(box.max.x + 1e-3)
+          expect(z).toBeGreaterThanOrEqual(box.min.z - 1e-3)
+          expect(z).toBeLessThanOrEqual(box.max.z + 1e-3)
+        }
+      }
 
-    expect(pos.count).toBeGreaterThan(4000)
-    expect(idx.count).toBeGreaterThan(12000)
-
-    const p0 = new Vector3()
-    const p1 = new Vector3()
-    const p2 = new Vector3()
-    const e1 = new Vector3()
-    const e2 = new Vector3()
-    const faceN = new Vector3()
-    const vN = new Vector3()
-
-    let aligned = 0
-    let nonDegenerate = 0
-    for (let i = 0; i < idx.count; i += 3) {
-      const a = idx.getX(i)
-      const b = idx.getX(i + 1)
-      const c = idx.getX(i + 2)
-      p0.fromBufferAttribute(pos, a)
-      p1.fromBufferAttribute(pos, b)
-      p2.fromBufferAttribute(pos, c)
-      e1.subVectors(p1, p0)
-      e2.subVectors(p2, p0)
-      faceN.crossVectors(e1, e2)
-      if (faceN.lengthSq() < 1e-10) continue
-      nonDegenerate++
-      vN.fromBufferAttribute(norm, a)
-      if (faceN.dot(vN) > 0) aligned++
+      // The pool's rim hugs the inner dam wall, whatever the seed's dam size and yaw
+      const pool = buildRimstonePoolGeometry(field, 12, 32)
+      const pos = pool.getAttribute('position') as BufferAttribute
+      let maxU = 0
+      for (let i = 0; i < pos.count; i++) maxU = Math.max(maxU, field.rimstoneCoord(pos.getX(i), pos.getZ(i)))
+      expect(maxU).toBeLessThan(0.92)
+      expect(maxU).toBeGreaterThan(0.88)
+      lake.dispose()
+      pool.dispose()
     }
-    expect(aligned / nonDegenerate).toBeGreaterThan(0.98)
-
-    const lake = buildHollowLakeGeometry(field, 48, 64)
-    const rimPool = buildRimstonePoolGeometry(field, 12, 32)
-    expect(lake.getIndex()!.count).toBeGreaterThan(1000)
-    expect(rimPool.getIndex()!.count).toBeGreaterThan(500)
-
-    shell.dispose()
-    lake.dispose()
-    rimPool.dispose()
   })
 
-  it('generates cleaved boulders, speleothems, and active over-lake drip emitters with consistent vertex attributes', () => {
+  it('places boulders, dripstones, draperies and over-lake drip emitters', () => {
     const field = new HollowField({seed: 1056})
-    const rocks = buildHollowRocks(field, 6)
-    field.setBoulderProxies(rocks.proxies)
-    field.rebuildVolumeTexture()
+    const rocks = placeHollowRocks(field, 6)
+    expect(rocks.length).toBeGreaterThan(6)
 
-    expect(rocks.proxies.length).toBeGreaterThanOrEqual(8)
-    expect(rocks.geometry.getAttribute('aZone').itemSize).toBe(4)
-    expect(rocks.geometry.getAttribute('aCollar').itemSize).toBe(1)
-
-    const speleothems = buildHollowSpeleothems(field, {
-      stalactiteDensity: 1.0,
-      stalagmiteDensity: 1.0,
-      draperyScale: 1.0,
-    })
-
+    const speleothems = buildHollowSpeleothems(field, {stalactiteDensity: 1, stalagmiteDensity: 1, draperyScale: 1})
     expect(speleothems.stalactiteCount).toBeGreaterThan(80)
     expect(speleothems.stalagmiteCount).toBeGreaterThan(8)
     expect(speleothems.draperyCount).toBeGreaterThanOrEqual(4)
-    expect(speleothems.dripEmitters.length).toBeGreaterThan(2)
+    expect(speleothems.bodies.length)
+      .toBe(speleothems.stalactiteCount + speleothems.stalagmiteCount + speleothems.draperyCount)
 
+    // Every body is solid at its core and open around it (its own distance, not counting the cave)
+    const sculpt = new HollowSculpt(field, [...rocks, ...speleothems.bodies])
+    for (const body of sculpt.bodies) {
+      let core: Vector3
+      if (body.kind === 'rock') core = body.center
+      else if (body.kind === 'dripstone') core = new Vector3(...body.spine.subarray(8, 11))
+      else core = new Vector3(...body.curve.subarray(body.curve.length / 2 - 1, body.curve.length / 2 + 2))
+      expect(sculpt.bodyDistance(body, core.x, core.y, core.z)).toBeLessThan(0)
+      expect(sculpt.bodyDistance(body, body.max.x + 0.2, body.max.y + 0.2, body.max.z + 0.2)).toBeGreaterThan(0)
+    }
+    // A stalactite hangs from its anchor to its tip
+    const stalactite = speleothems.bodies.find(b => b.kind === 'dripstone' && b.hanging)
+    expect(stalactite?.kind).toBe('dripstone')
+    const s = stalactite!.kind === 'dripstone' ? stalactite!.spine : new Float32Array(8)
+    expect(s[s.length - 3]).toBeLessThan(s[5])
+    // A drapery is a sheet a few centimetres thick: solid on its curve, open a decimetre off it
+    const drapery = speleothems.bodies.find(b => b.kind === 'drapery')!
+    if (drapery.kind === 'drapery') {
+      const c = drapery.curve
+      const i = Math.floor(c.length / 6) * 3
+      const tx = c[i + 3] - c[i]
+      const tz = c[i + 5] - c[i + 2]
+      const l = Math.hypot(tx, tz)
+      const below = c[i + 1] - 0.4
+      expect(sculpt.bodyDistance(drapery, c[i], below, c[i + 2])).toBeLessThan(-0.015)
+      expect(sculpt.bodyDistance(drapery, c[i] - (tz / l) * 0.12, below, c[i + 2] + (tx / l) * 0.12)).toBeGreaterThan(0.02)
+    }
+
+    expect(speleothems.dripEmitters.length).toBeGreaterThan(2)
     for (const tip of speleothems.dripEmitters) {
       expect(tip.y).toBeGreaterThan(field.params.waterLevel + 0.5)
       expect(field.lakeDepthAt(tip.x, tip.z)).toBeGreaterThan(0.15)
     }
 
-    rocks.geometry.dispose()
-    speleothems.geometry.dispose()
+    // Drops: seeded, inside the loop, falling exactly from their tip to the water
+    const duration = 90
+    const drops = scheduleHollowDrops(field, speleothems.dripEmitters, duration)
+    expect(drops).toEqual(scheduleHollowDrops(field, speleothems.dripEmitters, duration))
+    expect(drops.length).toBeGreaterThan(30)
+    for (const drop of drops) {
+      expect(drop.spawn).toBeGreaterThanOrEqual(0)
+      expect(drop.spawn).toBeLessThan(duration)
+      const height = speleothems.dripEmitters[drop.emitter].y - field.params.waterLevel
+      expect(drop.speed * drop.fall + 0.5 * 9.81 * drop.fall * drop.fall).toBeCloseTo(height, 4)
+    }
+  })
+
+  it('sculpts the cave and its bodies as one closed surface, materials blended across the fillets', async () => {
+    const start = performance.now()
+    const field = new HollowField({seed: 1056})
+    const speleothems = buildHollowSpeleothems(field, {stalactiteDensity: 1, stalagmiteDensity: 1, draperyScale: 1})
+    const bodies = [...placeHollowRocks(field, 10), ...speleothems.bodies]
+    const pool = new HollowSculptPool()
+    const cave = (await pool.build(field, bodies))!
+    pool.dispose()
+    // Well within the budget (`30 s`) on the workers
+    console.log(`Hollow sculpt: ${((performance.now() - start) / 1000).toFixed(1)} s, ${cave.getAttribute('position').count} vertices`)
+    expect(performance.now() - start).toBeLessThan(30_000)
+    const sculpt = new HollowSculpt(field, bodies)
+
+    const pos = cave.getAttribute('position') as BufferAttribute
+    const norm = cave.getAttribute('normal') as BufferAttribute
+    const zone = cave.getAttribute('aZone') as BufferAttribute
+    const ao = cave.getAttribute('aOcclusion') as BufferAttribute
+    const idx = cave.getIndex()!
+    expect(pos.count).toBeGreaterThan(200000)
+
+    // Closed but for the skylight's mouth, and wound with its front faces into the open (along the normals)
+    expect(openEdges(cave)).toBe(0)
+    const p0 = new Vector3()
+    const p1 = new Vector3()
+    const p2 = new Vector3()
+    const n = new Vector3()
+    let aligned = 0
+    let faces = 0
+    for (let i = 0; i < idx.count; i += 3 * 7) {
+      p0.fromBufferAttribute(pos, idx.getX(i))
+      p1.fromBufferAttribute(pos, idx.getX(i + 1))
+      p2.fromBufferAttribute(pos, idx.getX(i + 2))
+      const face = p1.sub(p0).cross(p2.sub(p0))
+      if (face.lengthSq() < 1e-12) continue
+      faces++
+      if (face.dot(n.fromBufferAttribute(norm, idx.getX(i))) > 0) aligned++
+    }
+    expect(aligned / faces).toBeGreaterThan(0.98)
+
+    // On the surface, unit normals, occlusion in [0, 1]
+    let off = 0
+    for (let v = 0; v < pos.count; v += 13) {
+      if (Math.abs(sculpt.distance(pos.getX(v), pos.getY(v), pos.getZ(v))) > 0.01) off++
+      expect(n.fromBufferAttribute(norm, v).length()).toBeCloseTo(1, 4)
+      expect(ao.getX(v)).toBeGreaterThanOrEqual(0)
+      expect(ao.getX(v)).toBeLessThanOrEqual(1)
+    }
+    expect(off / (pos.count / 13)).toBeLessThan(0.02)
+
+    // Around a stalagmite's foot the calcite runs out onto the cave: travertine falls off with the distance, through
+    // values between the two (a blend, not a seam)
+    const stalagmites = speleothems.bodies.filter(b => b.kind === 'dripstone' && !b.hanging)
+    const bands = [0, 0, 0]
+    const between = [0, 0, 0]
+    for (let v = 0; v < pos.count; v++) {
+      const x = pos.getX(v)
+      const y = pos.getY(v)
+      const z = pos.getZ(v)
+      for (const body of stalagmites) {
+        const d = sculpt.bodyDistance(body, x, y, z)
+        if (d < 0.01 || d > 3 * body.blend) continue
+        const band = d < body.blend ? 0 : d < 2 * body.blend ? 1 : 2
+        bands[band]++
+        const cave = field.zonesAt(x, y, z, norm.getY(v)).travertine
+        const t = zone.getY(v)
+        if (t > Math.min(cave, 0.92) + 0.02 && t < Math.max(cave, 0.92) - 0.02) between[band]++
+        break
+      }
+    }
+    expect(bands[0]).toBeGreaterThan(100)
+    expect(between[0] / bands[0]).toBeGreaterThan(0.5)
+    expect(between[2] / bands[2]).toBeLessThan(between[0] / bands[0])
+
+    // The rimstone dam's lip gets fine cells
+    const wl = field.params.waterLevel
+    let rimEdges = 0
+    let rimLength = 0
+    for (let i = 0; i < idx.count; i++) {
+      p0.fromBufferAttribute(pos, idx.getX(i))
+      p1.fromBufferAttribute(pos, idx.getX(i - (i % 3) + ((i % 3) + 1) % 3))
+      const mid = p2.addVectors(p0, p1).multiplyScalar(0.5)
+      if (field.rimstoneCoord(mid.x, mid.z) > 1.2 || Math.abs(mid.y - wl) > 0.25) continue
+      rimEdges++
+      rimLength += p0.distanceTo(p1)
+    }
+    expect(rimEdges).toBeGreaterThan(3000)
+    expect(rimLength / rimEdges).toBeLessThan(0.08)
+
+    // The drapery sheets are part of the surface, their triangles drawn with the translucent calcite: thin where
+    // they hang free, thickening to opaque rock across their fillets
+    const sheet = cave.getAttribute('aSheet') as BufferAttribute
+    const [rock, calcite] = cave.groups
+    expect(rock.start).toBe(0)
+    expect(calcite.start).toBe(rock.count)
+    expect(rock.count + calcite.count).toBe(idx.count)
+    expect(calcite.count / 3).toBeGreaterThan(50000)
+    let thin = 0
+    for (let i = calcite.start; i < calcite.start + calcite.count; i += 3 * 5) {
+      const t = sheet.getX(idx.getX(i))
+      expect(t).toBeGreaterThan(0.03)
+      if (t < 0.1) thin++
+    }
+    expect(thin / (calcite.count / 15)).toBeGreaterThan(0.6)
+    for (let i = 0; i < rock.count; i += 3 * 101) expect(sheet.getX(idx.getX(i))).toBeGreaterThan(0.3)
+
+    // Hardly a fold: triangles turned against their vertices' normals, bigger than a twentieth of their cell, are rare
+    let flipped = 0
+    for (let i = 0; i < idx.count; i += 3) {
+      p0.fromBufferAttribute(pos, idx.getX(i))
+      p1.fromBufferAttribute(pos, idx.getX(i + 1))
+      p2.fromBufferAttribute(pos, idx.getX(i + 2))
+      const face = p1.sub(p0).cross(p2.sub(p0))
+      n.fromBufferAttribute(norm, idx.getX(i))
+        .add(p0.fromBufferAttribute(norm, idx.getX(i + 1)))
+        .add(p0.fromBufferAttribute(norm, idx.getX(i + 2)))
+      if (face.dot(n) < 0 && face.length() > 2e-4) flipped++
+    }
+    expect(flipped).toBeLessThan(idx.count / 3 / 5000)
+
+    cave.dispose()
   })
 })

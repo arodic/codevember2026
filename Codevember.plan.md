@@ -91,10 +91,10 @@ todos:
     status: completed
   - id: hollow-phase1-karst-shell
     content: "Day 7 (Hollow) Phase 1A: 3D karst SDF spine (S-bend lake, vaulted ribs, rear skylight shaft, terraced gours, foreground rimstone dam, hidden left fire alcove), CPU Surface Nets shell + 128x64x160 HalfFloat 3D SDF/normal volume"
-    status: pending
+    status: completed
   - id: hollow-phase1-rocks-speleothems
     content: "Day 7 (Hollow) Phase 1B: Voronoi-cleaved hero boulders, rib-guided ceiling stalactites (with drip emitter sockets), pagoda stalagmites, fluted wall draperies, tangent collar skirts, 2.39:1 Cinema + Cutaway clay/water blockout review"
-    status: pending
+    status: completed
   - id: hollow-phase2-lighting-volumetrics
     content: "Day 7 (Hollow) Phase 2A: dual static LightProbeGrid GI (3-bounce cyan skylight + unit fire scaled live by flickering off-screen fire rig), RectAreaLights, localized parallax PMREM specular probes, in-scene volumetric skylight shafts & cave mist"
     status: pending
@@ -332,26 +332,30 @@ Split into two reviewable milestones so cavern architecture, proportions, water 
 
 ### Phase 1 — Procedural Karst Generation, Speleothems & Seamless Blockout
 
-**Files:** `src/days/Hollow.ts`, `src/days/hollow/{HollowField,HollowShell,HollowRocks,HollowSpeleothems}.ts`, `HollowField.test.ts`.
+**Files:** `src/days/Hollow.ts`, `src/days/hollow/{HollowField,HollowSculpt,HollowOctree,HollowSculptPool,HollowSculptWorker,HollowRocks,HollowSpeleothems,HollowLake,HollowVertexLight}.ts`, `HollowField.test.ts`, `HollowOctree.test.ts`.
 
 1. **3D Karst Signed Distance Field (`HollowField.ts`, deterministic seeded PRNG)**
    - **Bounds:** `X ∈ [-14, 14] m`, `Y ∈ [-3, 11] m`, `Z ∈ [-28, 8] m`.
    - **Meandering Cavern Spine:** S-curved centerline $(x_c(z), y_{\text{floor}}(z))$ sweeping an asymmetric vaulted cross-section:
      - *Main Flooded Grotto (`z ∈ [-10, +6]`):* Lake basin below $y = 0$, vaulted ceiling $y \approx 5.5\text{–}7.2\,\text{m}$ scored by diagonal joint-guided **ceiling dissolution ribs** (matching reference upper-left-to-center stalactite arcs).
-     - *Left Travertine Gallery & Occluded Fire Alcove (`x < -3`, `z ∈ [-9, -1]`):* Stepped horizontal rock shelf ($y \approx 0.9\text{–}2.8\,\text{m}$) with recessed side pocket (`x ≈ -9.5, z ≈ -5.5`) shielded from camera sightlines by a natural limestone pillar.
+     - *Travertine Gallery (opposite the hero boulder, `z ∈ [-9, -1]`):* Stepped horizontal rock shelf ($y \approx 0.9\text{–}2.8\,\text{m}$) catching the fire spill.
+     - *Fire Alcove (behind the cinema camera plane, Locked Decision 4):* Open pocket around `fireOrigin`, with a spill pillar between it and the camera pad.
      - *Rear Cascade & Skylight Shaft (`z ∈ [-25, -10]`):* Floor climbs $y = 0 \to +2.4\,\text{m}$ via 8–12 scalloped horizontal travertine `gour` steps beneath an angled karst chimney opening to the sky at `(x ≈ +2.5, y ≈ +9.5, z ≈ -20)`.
      - *Foreground Rimstone Dam (`x ≈ -2.8, z ≈ +1.2`):* Kidney-shaped raised calcified rim (`smin` fused to left shore) enclosing a shallow flat mineral basin just above lake level.
    - **Lithological Sculpting in SDF:** Continuous bed-competence terracing (`terrace(y + dip)`) cuts horizontal limestone strata ledges into walls; phreatic dissolution noise carves ceiling cupolas. All structural unions use polynomial `smin(a, b, k)` (`k = 0.6–1.4 m` vaults, `k = 0.1–0.25 m` terraces) for $C^1$ topological fillets.
 
-2. **Surface Nets Cavern Extraction & Shared GPU 3D SDF Volume (`HollowShell.ts`)**
-   - **CPU Dual/Surface Nets (`~150 × 84 × 180`, ~18 cm cells):** Extracts clean manifold quad/triangle indexed `BufferGeometry` (`~90k–130k` tris, zero Marching Cubes sliver triangles, exact central-difference SDF normals).
-   - **GPU 3D Distance & Gradient Volume (`Data3DTexture` `128 × 64 × 160` `RGBA16F`, ~10 MB):** Stores $\Phi(\mathbf{x}) = (\nabla\phi_{\text{total}}(\mathbf{x}), \phi_{\text{total}}(\mathbf{x}))$ uniting the cave shell + static boulder proxies. Sampled by all TSL shaders for seamless normal/material blending, 3D SDF ambient occlusion, probe-offset biasing, and lake shoreline wave reflection.
+2. **One sculpted surface: cave + boulders + dripstones + draperies in one SDF (`HollowSculpt.ts`, `HollowOctree.ts`; as built 2026-11-14)**
+   - **Field:** the cave (closed by the volume's sides 10 cm in, open at the top) smooth-unioned (`smin`, `k` = the body's fillet: boulders `0.7 × min radius`, `12–50 cm`; dripstones their base radius, `5–30 cm`; draperies `8 cm`) with each body: boulders = ellipsoid ∩ 14 cleavage planes (`smax`, bevelled) + relief + bedding notches; stalactites / stalagmites = round-cone chains along a spine (root buried, bending plumb, tips `1.5 cm`), flutes only where their cells resolve them; draperies = a sheet `3.8–7 cm` thick off a folded 64-column anchor curve under the ceiling (organ-pipe ribs, sawtooth fringe, rounded rim, root `25 cm` into the rock). Bodies blend with each other too (clusters fuse).
+   - **Material signal:** the same smooth-union weights, `2×` wider, blend `aZone` (strata, travertine, rimstone, wetness) and `aSheet` (calcite thickness, height above the growing edge; `1 m` = opaque rock) from cave to body: calcite runs out onto the floor around a stalagmite's foot. Triangles with a vertex on a sheet thinner than `0.5 m` form the calcite group (translucent material, transmission fades to nothing across the fillet), the rest the rock group: one mesh, two materials, no seam.
+   - **Mesher:** adaptive octree dual contouring, crack-free across cell sizes, finest `1.25 cm` (depth 12): `20 cm` cave, `5 cm` rimstone dam, `2.5–5 cm` around the bodies (graded `0.5 m/m` from the body itself, not its box). Every node sees its 8 corners (shared lattice): crossed nodes split to their cell; nodes no corner shows crossed are probably empty only if every sample is farther than the half-diagonal and than the field's range across it (the cave field bends: big cells near steep risers held surface, folded triangles = the holes and spikes seen first). Crossed nodes split further where a flat facet's sagitta (`|mean(corners) − centre| / slope`) passes `0.1 × size` (`~45°` of bend, or two sheets in one cell), down to `5 cm` on cave creases (terrace edges, strata lips), `2.5 cm` on the dam, `1.25 cm` on bodies (drapery sheets only near their rim: elsewhere their mid-surface reads as a crease). Vertices: mass point, Newton step, then 3 relaxation steps (half-way to the neighbours' mean in the tangent plane, back onto the surface, `0.5` cell margin), gradient normals. Quads fold along the diagonal the surface bends least over (`|(n_a − n_c) · (c − a)|`), never against the normals. Closed but for the skylight mouth; ~250 visible folds left out of 1.8M triangles (slivers where the surface lies in a lattice plane or on knife-edged strata lips). ~910k vertices (seed 1056).
+   - **Parallel:** 55 z-slabs of `0.8 m`, each meshed with a one-leaf skin across its faces and stitched by leaf keys (identical to one piece; vertices on slab faces don't relax); `HollowSculptPool` runs them on `hardwareConcurrency − 1` workers: ~9.5 s in headless Chromium (37 s single-threaded; budget 30 s). The old cave stays on screen until the new one arrives. Later: cache the default seed's mesh.
+   - **GPU 3D Distance & Gradient Volume (deferred, not built; see As Built):** Stores $\Phi(\mathbf{x}) = (\nabla\phi_{\text{total}}(\mathbf{x}), \phi_{\text{total}}(\mathbf{x}))$ uniting the cave shell + static boulder proxies. Sampled by all TSL shaders for seamless normal/material blending, 3D SDF ambient occlusion, probe-offset biasing, and lake shoreline wave reflection.
 
 3. **Procedural Rocks, Boulders & Speleothems (`HollowRocks.ts`, `HollowSpeleothems.ts`)**
    - **Cleaved Boulders & Buttresses:** Subdivided polyhedra sculpted by Voronoi planar bevel cuts (`smax`) + bedding notches + flared basal skirts; includes hero angular boulder jutting into right pool (`x ≈ +2.3, z ≈ -4.2`) and foreground wet rock benches.
    - **Ceiling Stalactites & Curtain Ribs:** Spawned on ceiling convex ribs ($N_y < -0.45$, high rib curvature); tapered fluted calcite icicles with conical ceiling root bosses. `8–16` stalactite tips directly above deep water register as **active droplet emitters** $(x_i, y_{\text{tip},i}, z_i)$.
    - **Ledge Stalagmites:** Stacked drip-ring pagoda/conical profiles with broad flowstone pedestals (`smin` flared collar) on flat shelves ($N_y > 0.75$, left firelit gallery).
-   - **Fluted Wall Draperies ("Cave Bacon" / Organ-Pipe Curtains):** Swept S-folded ribbon meshes hanging down upper-right and upper-left overhangs with downward-growing vertical flutes and serrated icicle fringes.
+   - **Fluted Wall Draperies ("Cave Bacon" / Organ-Pipe Curtains):** Swept S-folded calcite sheets (bodies of the sculpted field, § 2) hanging down upper-right and upper-left overhangs with downward-growing vertical flutes and serrated icicle fringes.
 
 4. **Phase 1 Blockout Review Mode**
    - Clean warm/cool preview rig + matte clay / geological-zone debug shading + flat translucent water plane.
@@ -359,47 +363,62 @@ Split into two reviewable milestones so cavern architecture, proportions, water 
 
 ---
 
-### Phase 2 — Static GI Baking, Fire Atmosphere, Rippling Reflector Lake, Volumetrics & Clearcoat Lithology
+### Phase 2 — Physically Based Light: VXGI Light Maps, Fire, Refracting Lake, Lit Mist & Clearcoat Lithology
 
-**Files:** `src/days/hollow/{HollowLighting,HollowWater,HollowVolumetrics,HollowMaterial}.ts`.
+**Files:** `src/days/hollow/{HollowLighting,HollowAtmosphere,HollowWater,HollowMaterial}.ts`.
 
-1. **Dual-Rig Static GI Baking + Live Off-Screen Fire + Area Lights (`HollowLighting.ts`)**
-   - **Linearity Trick for Static Bake + Live Flickering Fire (`0 ms/frame` runtime GI cost):**
-     - Bake **two** GPU-resident `LightProbeGrid` L2 SH volumes (`three/addons/lighting/LightProbeGrid.js`, e.g. `16 × 10 × 22` probes, 3 bounces in `onBeforeDraw` on seed/layout change):
-       1. `skyProbeGrid`: multi-bounce cyan indirect light from the skylight shaft + sky portal.
-       2. `fireProbeGrid`: multi-bounce amber indirect light from the occluded left fire alcove at unit intensity.
-     - Sample both in `LightMappedMaterial` via `lightProbeGridIrradiance(grid, safePos, normal)` (`safePos` pushed out of rock using $\Phi(\mathbf{x})$ gradient so wall-embedded probes never leak dark), combining live at 60 fps:
-       $$\mathbf{E}_{\text{GI}}(\mathbf{x},\mathbf{N},t) = \mathbf{E}_{\text{sky}}(\mathbf{x},\mathbf{N}) + I_{\text{fire}}(t)\,\mathbf{T}_{\text{fire}}(t)\,\mathbf{E}_{\text{fire}}(\mathbf{x},\mathbf{N})$$
-   - **Direct & Area Lights (`RectAreaLightNode` LTC + Shadow Lights):**
-     - *Skylight:* Shadow-casting `DirectionalLight`/`SpotLight` (`2048²` PCF) through the top opening + tilted cyan `RectAreaLight` across the sinkhole aperture for broad wet-rock specular sheen + 8-step 3D-SDF soft penumbra cone toward the wide opening.
-     - *Off-Screen Fire:* Occluded left alcove rig combining a warm `RectAreaLight` (broad orange-white wet specular wrap) + shadow-casting `PointLight` (`1024²`) whose position dances (`±10 cm` band-limited curl noise) and whose intensity/Planckian tint (`1850 K–2350 K`) flickers time-periodically over `timeline.duration`.
-   - **Localized Wet Specular Probes:** `2` static `CubeCamera` → `PMREMGenerator` cubemaps (Main Lake Grotto + Rear Skylight Chamber) baked post-GI with box/ellipsoid parallax correction (`getParallaxCorrectNormal`), blended in `envNode` (fire lobe scaled by $I_{\text{fire}}(t)$) for crisp skylight/fire glints on wet clearcoat rock.
+1. **Physically Based Light Rig + VXGI Light Maps (`HollowLighting.ts`)**
+   - **Only three sources, all occluded by the rock; nothing else emits** (no fill, no ambient, no GI multiplier, no unlit materials). Photometric levels: one scene unit of illuminance ≈ 1 klx, colors at unit luminance.
+     - *Sun:* shadowed `DirectionalLight` (5600 K, `4096²`, orthographic shadow camera fitted around the whole cavern, re-rendered only after a rebuild), `sunIlluminance`.
+     - *Sky:* the emissive portal over the chimney mouth, a Rayleigh-blue radiance (`skyLuminance`), seen by the GI with correct occlusion.
+     - *Fire:* shadowed inverse-square `PointLight` (decay 2, no cutoff) behind the camera, flickering: intensity ±22 %, Planckian `1850–2350 K`, position ±10 cm, whole cycles per loop.
+   - **Diffuse GI = VXGI baked per vertex, per source (2026-11-14).** `unwrapUVs` on the sculpted mesh took 11.5 s and fragmented (8 texels/m), so `VertexLightMapper` draws each vertex as a point into its own texel (`aLightTexel`, `2048 × rows`) and the material fetches it in the vertex stage: indirect light as fine as the mesh (`2.5–20 cm`, finer than the `~23 cm` voxels it samples), no atlas. A `VXGIVolume` (192 voxels on the long axis, 2 cached bounces, directional radiance, GI layer only: a stand-in of the cave clustered to `6 cm`, ~540k triangles, since the voxelizer packs every triangle into one storage buffer and the full mesh passes WebGPU's `128 MB` binding limit) holds one source at a time at unit intensity (zero intensities isolate a source without changing the light set; the portal's emission is in the voxelized triangles, so switching it re-voxelizes). A `LightMapper` accumulates 64 samples of `vxgiIrradiance` cones per source and the result is copied into that source's map. The rock's `lightMapNode` sums the three maps × the live levels: by linearity the sliders and the fire flicker (tint per channel too) need no rebake. Direct light stays analytic, so nothing is counted twice.
+   - **Wet Specular Probes:** `2` `CubeCamera` → `PMREMGenerator` cubes (lake grotto + skylight chamber), parallax-corrected and blended by z, **specular only**. Captured with `scene.environmentIntensity = 0` (else each capture re-reflects the last and light outlives the lights), refiltered into the same targets, and recaptured on the frame after any level change.
 
 2. **Meandering Mirror Lake & Dispersive Droplet Ripples (`HollowWater.ts`)**
    - **Planar Mirror (`reflector({ resolutionScale: 0.75, bounces: false, generateMipmaps: true })`):** Dead-still reflection at $y = 0$ weighted by exact dielectric water Fresnel ($F_0 = 0.02$, $\eta = 1.333$).
-   - **Shallow Mineral Water Absorption & Refraction:** Reads `viewportDepthTexture` / `viewportSharedTexture` (`BackdropWaterExample` pattern) with Beer–Lambert absorption ($\boldsymbol{\sigma}_a$ tuned so $< 0.35\,\text{m}$ shores glow warm ochre `#a56b32` and deeper pool shifts to `#1b88b0` cerulean).
+   - **Water has no albedo (`HollowWaterMaterial`):** Fresnel reflection (mirror or probes + the lights' GGX lobes) over the bed seen through it: screen-space refraction of a per-render-target `viewportTexture` (the shared one is resized between the main, mirror and probe passes and destroyed in use), Beer–Lambert absorption $\boldsymbol{\sigma}_a = (0.45, 0.07, 0.03)\,\text{m}^{-1}$ along the Snell path down and the light's path to the bed, and in-water scattering ($\sigma_s = 0.25\,\text{m}^{-1}$) of the mist's ambient radiance. The mist is applied once in `setupOutput`: the backdrop already carries it to the bed. Lake, rimstone pool and drops share it.
    - **Falling Stalactite Droplets & `512 × 512` Dispersive Wave Compute:**
      - Seeded periodic schedule spawns glinting elongated droplets from the ceiling stalactite emitter tips; droplets accelerate under $g = 9.81\,\text{m/s}^2$ and inject impulses on lake impact (`preroll: 6 s` in `CaptureDefaults`).
      - `512 × 512` `RG16F`/`R32F` GPU ping-pong wave PDE augmented with **capillary surface-tension dispersion** ($-\beta\nabla^4\eta$, producing multi-ring concentric capillary-gravity wave trains instead of single dull humps) and **Neumann boundary reflection** against the SDF shoreline mask ($\phi_{\text{total}}(x, 0, z) \le 0$), so ripples physically bounce off the rimstone dam and right boulder and bend `reflector.uvNode`.
 
-3. **In-Scene Volumetric Skylight Shafts & Cave Mist (`HollowVolumetrics.ts`)**
-   - **Why In-Scene (not post-only `GodraysNode`):** Post-processing effects run after `ReflectorNode`, which would leave the lake reflection missing the cyan mist and shafts.
-   - **Dual-Stage Atmosphere:**
-     1. `scene.fogNode`: distance + height cave haze tinting rear chamber (`z < -10`) toward `#3998d1` while keeping foreground grotto clear.
-     2. **Volumetric Skylight Shaft Mesh:** Bounding volume in rear chamber (`colorNode` + premultiplied alpha, `fragmentNode === null` so editor `traa` MRT views stay valid) raymarching `20` jittered steps through Skylight `2048²` shadow map + 3D humidity FBM with Henyey–Greenstein forward scattering ($g = 0.65$)—visible directly AND reflected in the mirror lake (`#6bbbd6`).
+3. **Cave Mist as a Participating Medium (`HollowAtmosphere.ts`)**
+   - **Applied to every surface through `scene.fogNode`** (so the mirror and the probes see it too): each fragment marches its view ray (24 jittered steps, ≤ 60 m), single scattering with Beer–Lambert extinction and energy-conserving steps; `σs` (`mistDensity`) thins upward from the water, broken by periodic noise drifting on a closed loop; zero in the rock (CPU air mask, for the cutaway).
+   - **In-scattering only from the real sources:** sun and fire visibility baked per `0.25 m` voxel from their shadow maps, through a Henyey–Greenstein phase ($g = 0.6$); the indirect light and the sky as the mean radiance around each `0.5 m` voxel, cone-traced through the VXGI volume per source at unit intensity and recombined each frame at the live (flickering) levels. Nothing glows on its own: all lights at zero render black.
 
 4. **Seamless Mesh Surface Blending & Hyper-Realistic Wet Clearcoat Stone (`HollowMaterial.ts`)**
-   - **GPU-Baked `1024²` Seamless PBR Detail Atlases (once in `onRendererInitialized`, `< 15 ms`, mipmapped + anisotropic):**
+   - **`1024²` Seamless PBR Detail Atlases (as built: CPU-baked once, RGBA8, periodic Voronoi, mipmapped + anisotropic):**
      1. *Fractured Cleaved Limestone* (Voronoi facets, micro-cracks, spar veins, pits),
      2. *Fluted Travertine & Micro-Terraced `Gour` Sinter* (scalloped calcified micro-ridges + crystal sparkle),
      3. *Karst Dissolution & Seepage* (phreatic scallops, mineral curtains).
-   - **3-Tier Seamless Rock-to-Rock & Rock-to-Cave Blending:**
-     1. *Vertex Collar Flare:* Placed rock/dripstone skirts project onto $\phi_{\text{cave}} = 0$ at grazing tangent angles.
-     2. *TSL 3D-SDF Normal & AO Fillet:* Within fracture-noise-modulated contact band $|\phi_{\text{cave}}| < w_{\text{blend}}$, mesh macro normal relaxes to $\nabla\phi_{\text{total}}(\mathbf{x})$, eliminating $C^0$ shading creases; 6-tap 3D-SDF cone AO adds natural calcite/crevice contact darkening.
+   - **3-Tier Seamless Rock-to-Rock & Rock-to-Cave Blending (superseded 2026-11-14 by the one sculpted surface, § 2; history below):**
+     1. *Skirt Flare (replaced):* each boulder / dripstone skirt flares into a quarter-circle fillet (radius `6–30 cm` boulders, `3–16 cm` dripstones) that meets the cave tangentially: vertices within the fillet radius move out along the cave's tangent plane (radial from the boulder's centre / the dripstone's spine, so neighbours agree) at their height above the cave. Dripstone collars first drape over the real (curved) cave along the host normal, which buries their open rim. Boulder templates are dense enough for the skirt (`~7 cm`). A cave-side fillet (smooth union in the shell's field) was tried and dropped: keeping only the fillet leaves a thin hidden rim inside each body that the `20 cm` Surface Nets grid aliases into spikes, and the refinement cost 2.7 s.
+     2. *Contact Normal & AO (AO kept: 4 probes along the normal in the combined field, `aOcclusion`):* toward the bottom of a skirt (within half its fillet) the vertex normal and zones blend into the cave's; the light maps bake from the vertex normals, so body and cave also match in indirect light (a shader-only normal bend did nothing to it). `aOcclusion`: 4 probes (`4–34 cm`) along each normal against the cave field and each other body (boulder: its own radial function; dripstone root: a chain of frustums), on indirect light only (`aoNode`): sub-voxel creases the VXGI light maps miss. Screen-space depth blending was rejected: the view may be multisampled and WebGPU cannot copy a multisampled depth buffer.
      3. *Continuous World-Space Derivative Triplanar:* Tightened triplanar weights ($\|\mathbf{N}\|^5$) in `positionWorld` space using tangent-free surface-gradient / UDN normal blending—identical detail across mesh boundaries with zero UV seams.
    - **Hydrological Wetness & Dual-Normal Clearcoat (`MeshPhysicalNodeMaterial`):**
      - Wetness field $W(\mathbf{x})$ (lake capillary fringe $y < 0.65\,\text{m}$, rimstone lip, active drip streaks, stalactite tips) darkens porous base albedo ($\text{albedo}^{1.45} \times 0.52$), lowers base roughness, and drives `clearcoatNode` ($0 \to 1$, `clearcoatRoughness: 0.04–0.12`) over a **smoothed `clearcoatNormalNode`** so liquid water films bridge micro-grain pits while preserving sharp rock detail underneath.
-     - Thin calcite speleothems & draperies add backlit **subsurface wrap transmission** so thin curtains glow warm amber / cool cyan at their edges.
+     - **Translucent calcite (as built):** draperies are `2–7 cm` sheets (thicker only at the root collar); the speleothem material adds the light reaching each sheet's far side (sun and fire through their shadow maps, sampled a sheet's thickness behind the fragment; the cave's indirect light as `π ×` the mist's mean radiance there), transmitted Lambertian with $T = 0.5\,e^{-\sigma_a\,s\,t}$, $\sigma_a = (9, 22, 48)\,\text{m}^{-1}$: thin sheets glow amber, thick ones red, rock is opaque. Iron-stained growth bands parallel to the growing edge (`aSheet`, uneven `~11 cm`, faded below 2 px) modulate the stain `s` (cave bacon). Dripstones are opaque (user: glowing rock tips looked unnatural).
+
+### Material Prototype (2026-11-14, `HollowMaterials`, not in Hollow until greenlit)
+
+One physically based surface for the whole cave (`applyHollowSurface`, `hollow/HollowSurface.ts`), on any `MeshPhysicalNodeMaterial` (in Hollow: `HollowLitMaterial`), from world position and world normal only (no UVs). It reads what the SDF already bakes per vertex: `aZone` (beds, calcite, rimstone, wetness), `aOcclusion`, `aSheet`.
+
+- **Layers, bottom up:**
+  - **Bedrock:** grey or grey-green limestone, buff or iron-red over metres. Swells, ridged weathering, grit, beds and partings, Worley joints that are open in patches, and pits.
+  - **Stains:** iron (ochre to rust, streaked down the walls) and manganese (black streaks under ledges).
+  - **Crust:** dry moonmilk and popcorn on steep and overhanging rock.
+  - **Calcite:** cream streaked with honey, orange with the iron. It has growth bands, flow lobes and vertical strips.
+  - **Rimstone:** honeyed travertine, crenulated.
+  - **Sediment:** mud and dust on up-facing surfaces, gathered in hollows.
+- **Water:**
+  - Water is a clearcoat over the solid. It covers the field's wet patches, rivulets down steep faces, strips down calcite (the dripstones' vertical strips), and puddles whose coat lies level.
+  - Wet darkening follows Lagarde: porous surfaces darken and saturate most.
+- **Relief:** the mesh lacks relief finer than its `5–20 cm` cells, so the material bump maps it. It uses Mikkelsen's surface gradient from screen derivatives, in metres, from the same noises that colour the surface.
+- **Antialiasing:** each noise fades to its mean where the pixel footprint can't resolve it.
+- **Cost:** about 35 Perlin noises and 1 Worley noise per pixel. That's not yet measured in the cave.
+- **Scene:** seven specimens sculpted and meshed as the cave is (`HollowSpecimens`: an SDF, `contourOctree`, Newton projection, the cave's attributes, meshed on workers in about 1.5 s). The specimens are a bedded wall with a flowstone tongue, stalactites with soda straws, a drapery, a flowstone cascade, a pagoda stalagmite, rimstone pools and a breakdown boulder. Five swatch spheres sit on a mud floor.
+- **Lighting:** headlamp, lantern, skylight, show cave (with a back flood through the drapery), raking, and studio (room environment).
+- **Controls:** subject, the Layers false-colour view, orbit and zoom, plus surface dials for wetness, iron, sediment, crust and relief.
 
 ---
 
@@ -408,7 +427,13 @@ Split into two reviewable milestones so cavern architecture, proportions, water 
 - [x] **1. Plan & Design (`hollow-plan`):** Two-phase architectural plan in `Codevember.plan.md`.
 - [x] **2. Phase 1A — Karst SDF & Surface Nets Cavern (`hollow-phase1-karst-shell`):** Seeded S-bend cavern + skylight + terraced `gours` + rimstone dam + behind-camera fire alcove SDF, Surface Nets shell mesh, GPU 3D SDF/normal volume, unit tests. Default seed `1056`.
 - [x] **3. Phase 1B — Rocks, Dripstones & Blockout Review (`hollow-phase1-rocks-speleothems`):** Voronoi-cleaved boulders, rib-guided stalactites (with drip emitters), pagoda stalagmites, fluted draperies, collar skirts, `Cinema` / `Cutaway`, seed-driven composition archetypes.
-- [x] **4. Phase 2A–C wired into `Hollow.ts` (`hollow-phase2-*`):** Dual `LightProbeGrid` bake + live fire, `HollowWater` reflector/droplets/ripples, volumetrics shafts/fog, wet clearcoat triplanar rock material. Still needs visual polish / bake tuning / CaptureDefaults / headless verify.
+- [x] **4. Phase 2A–C wired into `Hollow.ts` (`hollow-phase2-*`):** Occluded rig, specular-only PMREM probes, `HollowWater` reflector + GPU ripples + seeded drops, wet clearcoat triplanar rock, bloom + fade, `CaptureDefaults` (`preroll: 6`). Verified headless (seeds 1056, 7, 908). Dripstones wound outward (were inverted).
+- [x] **4b. Physically based light (2026-11-13):** VXGI light maps per source (live levels, no rebake), no fill or unlit glow, Rayleigh sky, inverse-square fire, refracting absorbing water, lit participating-medium mist. Verified headless: all lights at zero render black; seeds 1056, 908; cutaway.
+- [x] **5a. Contact & calcite (2026-11-14):** fire shadow blurred wide (24-tap receiver-plane PCF, `0.1 rad`, `512²` cube); shell refined to `~5 cm` around the rimstone dam (edge splits + Newton projection, watertight); baked contact AO + normal/zone blending at the boulder and speleothem contacts; translucent banded calcite draperies. Verified headless (1056, 908, cutaway, zero lights black, fire behind a curtain).
+- [x] **5b. Seamless contacts (2026-11-14):** skirt flares + collar drape + vertex-normal/zone blend replace the shader-only `aHost` bend (user: blending did not work); dripstones opaque; one rock material for shell and boulders. Verified headless (1056 slabs, stalagmites, overview).
+- [x] **5c. One sculpted surface (2026-11-14):** user: stalagmites on slopes still disconnected, abrupt material at skirts; asked for cave + bodies as one SDF with blended type signals. Built per § 2 (octree DC, slabs on workers ~3 s) + per-vertex VXGI light maps (no unwrap). Draperies stay a separate translucent mesh. Verified headless (1056: cinema, slab, stalagmites, rimstone, hero, stalactites, draperies; build preview).
+- [ ] **5d. Material prototype (2026-11-14):** `HollowMaterials` scene + `applyHollowSurface` (see Material Prototype). Waiting for the user's greenlight before it replaces `createHollowRockMaterial` in Hollow; the draperies' `calciteTransmission` then plugs in as `transmission`.
+- [ ] **5. Polish:** mist transmittance toward the lights (single scattering ignores it); exposure tuning against the reference; light levels (user: later).
 
 ### Locked Decisions (2026-11-13)
 
@@ -417,6 +442,17 @@ Split into two reviewable milestones so cavern architecture, proportions, water 
 3. **Audio:** Silent for now (no `Soundtrack` on Hollow).
 4. **Warm light:** Fire origin always behind the cinema camera plane (alcove + spill only; never in frame).
 5. **Seed hunting:** Seed must reshuffle major composition landmarks (spine, skylight, rimstone side/placement, camera pad, galleries, wall spans, cascade, fire side) so seed-hunting finds distinct widescreen frames — not micro-noise only. Default demo seed `1056` (good frame); do not overfit geometry to it — scene must hold across random seeds.
+6. **Light rig (2026-11-13):** physically based and occluded only: sun, sky portal, fire; no `RectAreaLight`s, no fill, no GI multiplier, nothing self-lit. Diffuse GI is VXGI → per-vertex light maps (`VertexLightMapper`) per source at unit intensity, scaled live.
+7. **Final look on:** bloom, the lit mist, `TimelineFade` and the fire flicker are on; the Lights sliders (sun, sky, fire, mist) are live, exposure is the Document's.
+8. **Ripples:** `512²` GPU capillary-gravity PDE with Neumann shores; drops on a seeded, loop-periodic schedule (a pure function of timeline time); impacts injected only for time played forward.
+9. **No dead plan code:** the SDF volume, collar attributes and dual-grid scaffolding were removed until a shader uses them.
+10. **Mist:** a participating medium (or nothing): no fog color, no shaft mesh; lit only by the three sources.
+
+### As Built (2026-11-13 review)
+
+- **Composition guard:** `HollowField.viewClearance()` (open air along the first 12 m of the look ray, worst over the dolly). Seeds under 0.95 re-pick camera + fire from a separate retry PRNG; clear seeds (1056) keep their exact draw. Before this, 13 of 40 seeds stared into a wall.
+- **Lake** = floor below the water, open air above it, outside the rimstone dam (`lakeDepthAt`); the lake mesh, wave grid and env probe follow `lakeExtent` per seed. The rimstone pool bisects the seeded dam.
+- **Shell** closes against the forced-solid volume border (the quad loops used to skip border edges, which left holes onto the background and leaked it into the probe bake). Test: no open edges except at the skylight mouth.
 
 ## 8. Tesseract
 

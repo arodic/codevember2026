@@ -303,6 +303,27 @@ Complete log. Entries before 2026-11-12 11:00 were written in the io repo (packa
 - Fix: clear stage disposes+recreates LightProbeGrid + clears PMREM env before direct; zero-intensity lights hidden; skyEmitter gates portal/shafts/rimstone; emissive rim off; bg #000.
 - Solo-light workflow: zero all → rebake (black) → enable one → rebake.
 
+## 2026-11-13 [hollow][review] Review + fix pass of Grok/Gemini Hollow (worktree `hollow`)
+- User decisions: occluded rig (drop RectAreaLights, portal sky GI, shadowed fire in bake+realtime); restore bloom/fog/fade/flicker; GPU 512² ripple PDE; delete dead SDF-volume/dual-grid code.
+- Bugs found/fixed: sun shadow frustum ±10 m (sun lit whole cave thru rock); sky RectArea pointed up (+π/2); lake reflection in albedo (black under fire); CPU ripple step not a wave eq, no uv bend, drops die after loop wrap; PMREM env added diffuse (double GI); env parallax box hardcoded; atlas sin lattice + non-periodic Voronoi seams, float32 textures; lake mesh/wave grid/rimstone pool hardcoded vs seed; Surface Nets skipped border edges -> holes (bg leaked into bake); dripstones wound inward (user spotted); gallery flare always left ignoring heroSide; zones hardcoded cascade z; rocks hardcoded camera x 0.55; speleothem "left" boost; rocks/spel used cavernWidth not widthBias; lookDy missing waterLevel; shaft raymarch outside Fn, marched backward from surface; vacuous rimSigns test; 13/40 seeds view blocked (pre-existing) -> viewClearance + retry PRNG.
+- Kept seed sequence: retired lake z clip draws kept as rand() calls; 1056 composition kept (rocks shift a bit via widthScale).
+- Verified headless: 1056/7/908, solo-light renders, red-bg hole test, play ripples. Checks: typecheck, lint, test, build pass.
+- Tooling: node 25 runs TS via --experimental-strip-types + resolve hook (.js->.ts) for CPU field probes (scratchpad/probe).
+
+## 2026-11-13 [hollow][lighting] Physically based light (user: PBR, VXGI light maps, no self-lit glow/fog)
+- Removed: LightProbeGrid, HemisphereLight fill, GI multiplier, constant-color scene fog, unshadowed shaft mesh (HollowVolumetrics.ts deleted), unlit droplets, rimstone sky glint, envMapIntensity 0.55 (was no-op anyway).
+- Added: VXGI volume + LightMapper per source (sun/fire/sky at unit intensity, live levels), unwrapUVs atlas 2048, HollowAtmosphere (participating-medium mist in fogNode: shadow-map visibility volume + HG + VXGI ambient, air mask), HollowWaterMaterial (refraction via per-RT viewportTexture, Beer–Lambert, in-water scatter, single fog application), HollowLitMaterial (lightMapNode + specular probes).
+- Self-lit glow at zero lights = PMREM probes never recaptured (debounce needs a later frame; paused editor) + probes re-reflecting old probes. Fixed: recapture next frame, environmentIntensity 0 during capture, refill PMREM targets in place.
+- Destroyed-texture error = viewportSharedTexture resized between cube/main passes -> viewportTexture().
+- Defaults: sun 8, sky 8 (Rayleigh tint), fire 36 (decay 2), mist 0.03, exposure 0.8. Verified headless 1056/908/cutaway/zero. Checks pass.
+
+## 2026-11-14 [hollow][polish] Soft fire shadow, smooth rimstone lip, contact AO/blend, translucent calcite
+- Fire: custom `shadow.filterNode` (24 Vogel taps, 0.1 rad, receiver-plane depth so wide kernel doesn't self-shadow), map 512.
+- Rimstone lip: shell refined locally (u<1.45, y wl-0.35..+0.5): per-edge splits 3 passes to ~5 cm + Newton projection onto phi=0; watertight (same open edges = chimney). +16k verts, +0.6 s.
+- HollowOcclusion.ts: occluder proxies (rock ellipsoids, dripstone root capsules, 1 m grid), `bakeContact` -> `aOcclusion` (aoNode, indirect only) + `aHost` (cave normal, distance) for boulders/speleothems; material bends normal into cave's within 22 cm, zones blended on CPU. Depth-based blending rejected (MSAA depth can't be copied).
+- Calcite: 3 materials now (shell, boulders, calcite). Draperies thinned to 2–7 cm (`DRAPERY_SHEET 0.3`); transmission = far-side irradiance (sun/fire via shadow maps, indirect π·ambient) × 0.5 exp(−σa s t), σa (9,22,48); bands follow smoothed edge. Dripstone path 2.5× diameter.
+- Bugs found: transmission node built in ctor froze to zero (lazy Fn); comparison sampler vs textureSample (use compare in fragment, load in compute); zero lights not black: probe capture ran before ambient recombine.
+
 ## 2026-11-13 [rust] Phase 1 bake + periodic tile + volumetric material
 - Chemistry: fast-reaction precipitation conservative (clamp + per-patch rescale), acid kept (no acid-dissolves-iron), CO₂-buffered pH, GR Cl-limited, label kind propagation, brine crystallizes when effloresced, exchange currents ×1/18 (~0.25 A/m²), Stratmann reduction scaled (runaway cathode fixed). Fe/Cl conserved < 0.01%, deterministic.
 - Periodic 640 µm tile (multigrid + stencils + salt + drops wrap); surround grid removed; debug map tiled 3×3.
@@ -318,3 +339,32 @@ Complete log. Entries before 2026-11-12 11:00 were written in the io repo (packa
 - Growth: inner phases onto bare metal (BARE_DRAW outer only), pockets^1.6/1.4, noise ±30% → compact crust.
 - RustSEM: density pass (27-tap (1−d²/4)³, rgba8 3D, quarter-tick redraw, empty-brick skip 3.6 ms) + isosurface (SURFACE 1.4) + mx_noise grain + crystal habit SDFs + blended phase colors → botryoidal crust, rosettes, nodules; ~60 fps headless Close.
 - Checks: typecheck, lint, 55 tests, build, determinism. Open: ceiling by 10 d (more layers), drops/NaCl in image, cracks.
+
+## 2026-11-14 [hollow][contact] Seamless boulder/dripstone contacts, opaque dripstones (main checkout)
+- Moved worktree `hollow` changes into the main checkout (patch; memory files merged by hand with Rust notes).
+- User: contact blending did not work; asked about depth pre-pass / MSAA. Shader `aHost` bend removed (light maps ignore it).
+- Tried cave-side fillet (shell field min(phi, max(smin(phi,d,k), -d)), refined): spikes from hidden rim, 81k->146k shell verts, +2.7 s. Dropped.
+- Built: HollowContact.ts (bodies: rock radial SDF, dripstone frustum chain; flareIntoCave; HollowBodySet AO; bakeContact blends skirt normals/zones). Boulder templates ~7 cm (14-44 subdiv), fillet 0.35 min radius (6-30 cm); dripstone collars draped + flared, seeded stalagmites 16 sides.
+- Dripstones opaque (aSheet.z = translucent flag, draperies only). One rock material for shell + boulders.
+- Checks: typecheck, lint, 58 tests, build. Verified headless 1056 (slabs, stalagmites, overview).
+
+## 2026-11-14 [hollow][sculpt] One SDF surface for cave + bodies, octree DC on workers, per-vertex GI
+- User: stalagmites on slopes still disconnected, material abrupt at skirts; proposed cave + rocks + dripstones as one SDF with blended type signals, remesh, bake signals, UVs for light baking (deviation from layout OK). Later: "700k vertices is fine but 35s is way too much".
+- Built: HollowSculpt (rock = ellipsoid ∩ 14 planes smax + relief 3.5% + notches; dripstone = round-cone chain, flutes where resolvable, tip >= 0.7 cell; smin with cave + each other; zones blended 2× fillet), HollowOctree (adaptive DC, crack-free, slabs + stitch), HollowSculptPool/Worker (28 slabs, hardwareConcurrency-1 workers), HollowVertexLight (per-vertex VXGI bake replaces unwrapUVs + LightMapper). HollowContact deleted, HollowShell -> HollowLake (lake + pool only), rocks/speleothems place bodies only; draperies separate mesh (aSheet vec2, aOcclusion 1).
+- Perf: 35 s -> 12 s serial (profiling: hypot, memo, bound culls, hash), ~3 s in browser. unwrapUVs would have been 11.5 s + 8 texels/m.
+- Fixed: open edges at volume sides (box inset), early WebGPU 3D-texture errors (air mask upload at ctor), calcite aSheet vec3->vec2.
+- Checks: typecheck, lint, 58 tests (new HollowOctree.test.ts), build; headless 1056 dev + preview.
+
+## 2026-11-14 [hollow][mesh] Draperies in the SDF, mesher follows creases and thin features
+- User: draperies into the same pipeline; stalactite tips had a sharp triangle sticking out sideways; the small pool's edge had one big triangle-shaped hole; rounded steps' edges showed triangle jaggedness; improve the mesher or post-process. Budget: up to 30 s meshing; cache the default seed's mesh later.
+- Probe (seed 1056): holes/spikes = leaves of 0.4–1.6 m holding surface (center-only "probably empty" test; field bends) -> folded big triangles. Fixed with corner samples (crossed / range test).
+- Built: drapery bodies (sheet off folded curve, ribs, fringe, rounded rim, root in rock; min 3.8 cm), aSheet + rock/calcite groups on the cave mesh (draperyMesh gone), depth 12 (1.25 cm), sagitta refinement (feature cells), cell grading by body distance, relaxation (3 steps) + reprojection, bend-aware quad diagonals, tip radius 1.5 cm, slabs 0.8 m, clusterSurface GI proxy (VXGI 145 MB > 128 MB binding).
+- Result: ~910k verts, 37 s serial, ~9.5 s in headless Chromium; significant folds ~250 / 1.8M tris (lattice-plane slivers, strata lips). Pool rim notch gone (old vs new cinema), tips clean, steps smooth, draperies fused into the ceiling.
+- Checks: typecheck, lint, tests, build; headless 1056 dev (cinema, tips, pool, terrace, drapery).
+
+## 2026-11-14 [hollow][material] Material prototype scene (HollowMaterials)
+- User: material polish pass; new scene days/HollowMaterials.ts with meshes like the key geometries and selectable lighting; one cave material blending surface types from the SDF fields, world normals + world noises, PBR with albedo/reflectivity/roughness variety, clearcoat for wet patches and dripstone vertical strips; not in Hollow before greenlight. Refs: cave rock colors, cave detail color, dripstone, cave color (Desktop/ref).
+- Built: HollowSurface.ts (applyHollowSurface + controls uniforms + optional transmission hook), HollowSpecimens.ts (7 SDF specimens, Union zone blending like HollowSculpt, sculptSpecimen/meshSpecimensOnWorkers, swatches, floor) + HollowSpecimenWorker.ts, HollowMaterials.ts (6 lighting conditions, rig scaled per subject, headlamp on camera scaled by distance, simple drapery transmission from the main light, Layers debug), registered in IoCodevember DOCUMENTS. roundCone exported from HollowSculpt.
+- Fixed on the way: drapery/rimstone height-field normalization (holes), ellipsoid interior bound, `lighting` prop clash, empty-geometry warnings (hidden until meshed).
+- Iterated 4 headless batches: less iron, grey provinces, crust on overhangs with fractal edges, bands out of bump, fbm sediment, rimstone dry crests.
+- Checks: typecheck, lint, 60 tests (new HollowSpecimens.test.ts), build.

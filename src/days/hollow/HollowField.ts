@@ -1,16 +1,9 @@
-import {
-  Box3, ClampToEdgeWrapping, Data3DTexture, DataUtils, HalfFloatType, LinearFilter, MathUtils, RGBAFormat, Vector3,
-} from 'three/webgpu'
+import {Box3, MathUtils, Vector3} from 'three/webgpu'
 
 /** Cavern world bounds (`1 unit = 1 m`; `y = 0` is the main lake surface; +Z includes behind-camera fire alcove). */
 export const HOLLOW_MIN = new Vector3(-14.5, -2.5, -27.5)
 export const HOLLOW_MAX = new Vector3(14.5, 11.0, 16.5)
 export const HOLLOW_SIZE = new Vector3().subVectors(HOLLOW_MAX, HOLLOW_MIN)
-
-/** Resolution of the shared GPU 3D SDF & normal volume (`RGBA16F`: `.xyz = normal`, `.w = signedDistance`). */
-export const SDF_VOL_W = 96
-export const SDF_VOL_H = 56
-export const SDF_VOL_D = 128
 
 /** Elevation of the stepped foreground rimstone (`gour`) water meniscus above `waterLevel`. */
 export const RIMSTONE_POOL_STEP = 0.085
@@ -52,12 +45,12 @@ export const DEFAULT_HOLLOW_PARAMS: HollowFieldParams = {
   waterLevel: 0.0,
 }
 
-/** Ellipsoidal proxy for a placed boulder so the 3D SDF volume fillets rock-to-cave and rock-to-rock junctions. */
-export interface BoulderProxy {
-  center: Vector3
-  radii: Vector3
-  rotationY: number
-  fillet: number
+/** Axis-aligned `xz` extent of the open main lake (`lakeDepthAt > 0`), padded half a meter. */
+export interface HollowLakeExtent {
+  minX: number
+  maxX: number
+  minZ: number
+  maxZ: number
 }
 
 /** Lithological & hydrological weights at a world point (`0..1` each). */
@@ -103,8 +96,8 @@ function smoothstep(edge0: number, edge1: number, x: number): number {
  * Seeded 3D karst signed distance field (`phi > 0` = open cavern/sky air, `phi < 0` = solid limestone,
  * `grad(phi)` = surface normal pointing into open air).
  *
- * Designed for fast narrow-band CPU evaluation during Surface Nets extraction and speleothem placement, while packing
- * a `96×56×128` `HalfFloatType` `Data3DTexture` `(normal.xyz, phi)` for O(1) TSL surface blending and SDF occlusion.
+ * Designed for fast narrow-band CPU evaluation during Surface Nets extraction, rock and speleothem placement and the
+ * lake's shore mask.
  */
 export class HollowField {
 
@@ -169,32 +162,38 @@ export class HollowField {
   private meanderBias = 1.0
   private wallLeftSpan = 6.6
   private wallRightSpan = 5.5
-  private lakeFrontZ = 3.2
-  private lakeBackZ = -11.5
   private channelDepth = 1.55
   private fireAlcoveRx = 2.8
   private fireAlcoveRy = 2.1
   private fireAlcoveRz = 2.6
   private spillPillar = new Vector3(-3.4, 1.4, 8.2)
-  private boulderProxies: BoulderProxy[] = []
-
-  private readonly volumeData = new Uint16Array(SDF_VOL_W * SDF_VOL_H * SDF_VOL_D * 4)
-  readonly sdfTexture: Data3DTexture
+  private lakeExtentCache: HollowLakeExtent | null = null
+  /** Last `spineX` (`z`, value) and `rimstoneCoord` (`x`, `z`, value): a sample repeats them for its column. */
+  private readonly memoSpine = new Float64Array(2).fill(NaN)
+  private readonly memoRim = new Float64Array(3).fill(NaN)
 
   constructor(params?: Partial<HollowFieldParams>) {
-    this.sdfTexture = new Data3DTexture(this.volumeData, SDF_VOL_W, SDF_VOL_H, SDF_VOL_D)
-    this.sdfTexture.name = 'Hollow SDF Volume'
-    this.sdfTexture.format = RGBAFormat
-    this.sdfTexture.type = HalfFloatType
-    this.sdfTexture.minFilter = LinearFilter
-    this.sdfTexture.magFilter = LinearFilter
-    this.sdfTexture.wrapS = ClampToEdgeWrapping
-    this.sdfTexture.wrapT = ClampToEdgeWrapping
-    this.sdfTexture.wrapR = ClampToEdgeWrapping
-    this.sdfTexture.generateMipmaps = false
-    this.sdfTexture.unpackAlignment = 1
-
     this.configure(params ?? {})
+  }
+
+  /** Effective lateral scale of the cavern: the inspector's `cavernWidth` times the seed's own width bias. */
+  get widthScale() {
+    return this.params.cavernWidth * this.widthBias
+  }
+
+  /** Side (`±1` in x from the spine) of the warm travertine gallery: always opposite the hero boulder. */
+  get gallerySide() {
+    return -this.heroSide
+  }
+
+  /** Radius (`m`) that encloses the whole rimstone dam, for searches outward from `rimstoneCenter`. */
+  get rimstoneReach() {
+    return Math.max(this.rimRx, this.rimRz) * Math.max(0.35, this.params.rimstoneScale) * 1.6
+  }
+
+  /** z where the rear travertine cascade starts climbing out of the lake. */
+  get cascadeStart() {
+    return this.cascadeStartZ
   }
 
   configure(partial: Partial<HollowFieldParams>) {
@@ -218,8 +217,9 @@ export class HollowField {
     this.wallLeftSpan = (archetype === 3 ? 7.4 : 5.4) + rand() * 3.2
     this.wallRightSpan = (archetype === 2 ? 6.8 : 4.4) + rand() * 2.8
     this.channelDepth = 1.05 + rand() * 1.35
-    this.lakeFrontZ = 1.8 + rand() * 2.8
-    this.lakeBackZ = -8.5 - rand() * 7.5
+    // Two retired draws (the old lake z clips): the lake now ends where its floor does. Kept so seeds don't move.
+    rand()
+    rand()
 
     // --- Seed reshuffles major composition landmarks (not just micro-noise phases) ---
     this.spinePhase1 = rand() * Math.PI * 2
@@ -263,6 +263,43 @@ export class HollowField {
     this.featureDensity = 0.45 + rand() * 1.55
 
     // Cinema pad first — fire must stay behind this plane for every seed
+    this.placeCinema(rand)
+
+    // Skylight opening wanders widely across the rear vault
+    this.skylightCenter.set(
+      this.spineBias + (rand() - 0.5) * 11.0,
+      7.8 + rand() * 3.0,
+      MathUtils.clamp(this.cascadeEndZ + (rand() - 0.5) * 4.5, -26.5, -12.0),
+    )
+    const skyAimX = (rand() - 0.5) * 0.85
+    const skyAimZ = -0.15 - rand() * 0.7
+    this.skylightDirection.set(skyAimX, 0.45 + rand() * 0.5, skyAimZ).normalize()
+
+    // Rimstone dam: near shore, opposite hero boulder; may sit camera-left OR camera-right
+    const rimSide = rand() < 0.82 ? -this.heroSide : this.heroSide
+    this.rimstoneCenter.set(
+      this.cinemaPose.startX + rimSide * (0.6 + rand() * 3.8) + (rand() - 0.5) * 1.8,
+      this.params.waterLevel,
+      MathUtils.clamp(-1.8 + rand() * 5.2, -2.4, 4.2),
+    )
+
+    this.lakeExtentCache = null
+    this.clearMemos()
+    this.ensureClearView()
+    this.clearMemos()
+  }
+
+  /** Forgets the memoised `spineX` and `rimstoneCoord` (their inputs change while configuring). */
+  private clearMemos() {
+    this.memoSpine.fill(NaN)
+    this.memoRim.fill(NaN)
+  }
+
+  /**
+   * Seed-picks the cinema pad, look target, lens and dolly tracks, then the fire behind that camera plane, its
+   * alcove and the spill pillar between them.
+   */
+  private placeCinema(rand: () => number) {
     const startZ = 4.2 + rand() * 5.8
     const startX = this.spineBias * 0.15 + (rand() - 0.5) * 6.5
     const lookAim = Math.floor(rand() * 3) // 0 mid-lake, 1 cascade brow, 2 skylight-biased
@@ -284,7 +321,7 @@ export class HollowField {
     // Warm fire: strictly behind cinema look plane (never in widescreen FOV), usually camera-left
     const camY = this.params.waterLevel + this.cinemaPose.height
     const lookDx = this.cinemaPose.targetX - startX
-    const lookDy = this.cinemaPose.targetY - camY
+    const lookDy = this.params.waterLevel + this.cinemaPose.targetY - camY
     const lookDz = this.cinemaPose.targetZ - startZ
     const lookLen = Math.hypot(lookDx, lookDy, lookDz) || 1
     const lx = lookDx / lookLen
@@ -328,30 +365,66 @@ export class HollowField {
       this.params.waterLevel + 0.75 + rand() * 1.35,
       MathUtils.lerp(this.fireOrigin.z, startZ - 0.6, 0.28 + rand() * 0.3),
     )
-
-    // Skylight opening wanders widely across the rear vault
-    this.skylightCenter.set(
-      this.spineBias + (rand() - 0.5) * 11.0,
-      7.8 + rand() * 3.0,
-      MathUtils.clamp(this.cascadeEndZ + (rand() - 0.5) * 4.5, -26.5, -12.0),
-    )
-    const skyAimX = (rand() - 0.5) * 0.85
-    const skyAimZ = -0.15 - rand() * 0.7
-    this.skylightDirection.set(skyAimX, 0.45 + rand() * 0.5, skyAimZ).normalize()
-
-    // Rimstone dam: near shore, opposite hero boulder; may sit camera-left OR camera-right
-    const rimSide = rand() < 0.82 ? -this.heroSide : this.heroSide
-    this.rimstoneCenter.set(
-      startX + rimSide * (0.6 + rand() * 3.8) + (rand() - 0.5) * 1.8,
-      this.params.waterLevel,
-      MathUtils.clamp(-1.8 + rand() * 5.2, -2.4, 4.2),
-    )
-
-    this.boulderProxies = []
   }
 
-  setBoulderProxies(proxies: BoulderProxy[]) {
-    this.boulderProxies = proxies
+  /**
+   * Fraction (`0..1`) of the cinema look ray's first 12 m that runs through open air, worst of the dolly's start,
+   * middle and end. Below ~0.9 the camera stares into a wall or buttress.
+   */
+  viewClearance(): number {
+    const pose = this.cinemaPose
+    const tracks = this.cinemaTracks
+    const wl = this.params.waterLevel
+    const samples = 48
+    let worst = 1
+    for (const u of [0, 0.5, 1]) {
+      const camX = pose.startX + tracks.lateral * (u - 0.5)
+      const camZ = pose.startZ - tracks.forward * (u - 0.5)
+      const camY = Math.max(wl + pose.height, this.floorHeightAt(camX, camZ, true) + 0.42)
+      const dx = pose.targetX + tracks.lookDrift * (u - 0.5) - camX
+      const dy = wl + pose.targetY - camY
+      const dz = pose.targetZ - camZ
+      const len = Math.hypot(dx, dy, dz)
+      const reach = Math.min(12, len) / len
+      let air = 0
+      for (let i = 1; i <= samples; i++) {
+        const k = (i / samples) * reach
+        if (this.sample(camX + dx * k, camY + dy * k, camZ + dz * k) > 0) air++
+      }
+      worst = Math.min(worst, air / samples)
+    }
+    return worst
+  }
+
+  /**
+   * Re-picks a blocked seed's camera (and the fire placed behind it) from a separate retry generator, keeping the
+   * clearest; seeds that already see the cavern are left exactly as drawn.
+   */
+  private ensureClearView() {
+    let best = this.viewClearance()
+    if (best >= 0.95) return
+    const snapshot = () => ({
+      pose: {...this.cinemaPose},
+      tracks: {...this.cinemaTracks},
+      fire: this.fireOrigin.clone(),
+      alcove: [this.fireAlcoveRx, this.fireAlcoveRy, this.fireAlcoveRz],
+      pillar: this.spillPillar.clone(),
+    })
+    let bestState = snapshot()
+    const retry = createHollowRandom(this.params.seed * 613 + 17)
+    for (let attempt = 0; attempt < 24 && best < 0.95; attempt++) {
+      this.placeCinema(retry)
+      const clearance = this.viewClearance()
+      if (clearance > best) {
+        best = clearance
+        bestState = snapshot()
+      }
+    }
+    Object.assign(this.cinemaPose, bestState.pose)
+    Object.assign(this.cinemaTracks, bestState.tracks)
+    this.fireOrigin.copy(bestState.fire)
+    ;[this.fireAlcoveRx, this.fireAlcoveRy, this.fireAlcoveRz] = bestState.alcove
+    this.spillPillar.copy(bestState.pillar)
   }
 
   /** Fast periodic trilinear Hermite lattice noise in `[-1, 1]`. */
@@ -412,6 +485,14 @@ export class HollowField {
 
   /** Meandering cavern centerline X coordinate along Z (`z = +8` foreground -> `z = -24` rear chamber). */
   spineX(z: number): number {
+    // One sample asks for its column's spine several times (the walls, floor, ceiling and ribs)
+    const memo = this.memoSpine
+    if (memo[0] === z) return memo[1]
+    memo[0] = z
+    return memo[1] = this.computeSpineX(z)
+  }
+
+  private computeSpineX(z: number): number {
     const m = this.params.meander * this.meanderBias
     const sBend = -this.spineAmp1 * Math.sin((z + 1.5) * this.spineFreq1)
       + this.rearSwing * smoothstep(-8.0, -18.5, z)
@@ -422,6 +503,14 @@ export class HollowField {
 
   /** Normalized radial coordinate `u` of the foreground kidney-shaped rimstone (`gour`) pool (`u < 1` = inside lip). */
   rimstoneCoord(x: number, z: number): number {
+    const memo = this.memoRim
+    if (memo[0] === x && memo[1] === z) return memo[2]
+    memo[0] = x
+    memo[1] = z
+    return memo[2] = this.computeRimstoneCoord(x, z)
+  }
+
+  private computeRimstoneCoord(x: number, z: number): number {
     const scale = Math.max(0.35, this.params.rimstoneScale)
     const dx = x - this.rimstoneCenter.x
     const dz = z - this.rimstoneCenter.z
@@ -431,12 +520,15 @@ export class HollowField {
     const lz = (-s * dx + c * dz) / (this.rimRz * scale)
     // Kidney indentation on the lakeward side
     const kidneyX = lx - 0.18 * lz * lz
+    const radius = Math.sqrt(kidneyX * kidneyX + lz * lz)
+    // The scallops scale it by `1 / (0.818 … 1.182)`: far out it's past every threshold (`≤ 1.45`) anyway
+    if (radius > 1.75) return radius
     const angle = Math.atan2(lz, kidneyX)
     const organic = 1.0
       + 0.10 * Math.cos(2.0 * angle + this.rimPhase1)
       + 0.06 * Math.sin(3.0 * angle + this.rimPhase2)
       + 0.022 * Math.cos(9.0 * angle)
-    return Math.hypot(kidneyX, lz) / organic
+    return radius / organic
   }
 
   /** Mask `1` strictly inside the stepped rimstone water meniscus, `0` outside its calcified lip. */
@@ -451,7 +543,7 @@ export class HollowField {
    */
   floorHeightAt(x: number, z: number, withDetail = true): number {
     const wl = this.params.waterLevel
-    const widthScale = this.params.cavernWidth * this.widthBias
+    const widthScale = this.widthScale
     const cx = this.spineX(z)
     const dx = (x - cx) / widthScale
 
@@ -540,11 +632,42 @@ export class HollowField {
     return floorY
   }
 
-  /** Water depth (`> 0` where open main-lake water covers the bed, `0` on dry land or inside the stepped rimstone dam). */
+  /**
+   * Water depth (`> 0` where open main-lake water covers the bed; `0` on dry land, inside the stepped rimstone dam,
+   * and where the water plane would lie inside the cavern walls).
+   */
   lakeDepthAt(x: number, z: number): number {
-    if (z < this.lakeBackZ || z > this.lakeFrontZ) return 0.0
-    if (this.rimstoneCoord(x, z) < 1.02) return 0.0
-    return Math.max(0.0, this.params.waterLevel - this.floorHeightAt(x, z, true))
+    if (this.params.rimstoneScale > 0.05 && this.rimstoneCoord(x, z) < 1.02) return 0.0
+    const depth = this.params.waterLevel - this.floorHeightAt(x, z, true)
+    if (depth <= 0.0) return 0.0
+    if (this.macroSample(x, this.params.waterLevel + 0.05, z) <= 0.0) return 0.0
+    return depth
+  }
+
+  /** `xz` bounds of the open lake (cached per `configure`). */
+  get lakeExtent(): HollowLakeExtent {
+    if (this.lakeExtentCache) return this.lakeExtentCache
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity
+    const step = 0.25
+    for (let z = HOLLOW_MIN.z; z <= HOLLOW_MAX.z; z += step) {
+      for (let x = HOLLOW_MIN.x; x <= HOLLOW_MAX.x; x += step) {
+        if (this.lakeDepthAt(x, z) <= 0.0) continue
+        minX = Math.min(minX, x); maxX = Math.max(maxX, x)
+        minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z)
+      }
+    }
+    if (minX > maxX) {
+      const cx = this.spineX(-4.0)
+      minX = cx - 1; maxX = cx + 1; minZ = -5; maxZ = -3
+    }
+    this.lakeExtentCache = {minX: minX - 0.5, maxX: maxX + 0.5, minZ: minZ - 0.5, maxZ: maxZ + 0.5}
+    return this.lakeExtentCache
+  }
+
+  /** z at the middle of the lake. */
+  get lakeCenterZ() {
+    const e = this.lakeExtent
+    return 0.5 * (e.minZ + e.maxZ)
   }
 
   /**
@@ -553,7 +676,9 @@ export class HollowField {
    */
   ceilingRibMask(x: number, z: number): number {
     const diag = (this.ribDiagX * x + this.ribDiagZ * z) * 0.85 + this.ribPhase
-    const ribWaves = Math.pow(0.5 + 0.5 * Math.cos(diag), 6.0)
+    const wave = 0.5 + 0.5 * Math.cos(diag)
+    const wave2 = wave * wave
+    const ribWaves = wave2 * wave2 * wave2
     const cx = this.spineX(z)
     const centerOpenVault = 0.22 + 0.78 * (
       smoothstep(cx + 1.2, cx - 2.4, x) + smoothstep(cx + 2.2, cx + 4.2, x)
@@ -565,7 +690,7 @@ export class HollowField {
   /** Height of the main cavern ceiling vault at `(x, z)` (excluding the skylight chimney cutout). */
   ceilingHeightAt(x: number, z: number, withDetail = true): number {
     const vh = this.params.vaultHeight * this.vaultBias
-    const widthScale = this.params.cavernWidth * this.widthBias
+    const widthScale = this.widthScale
     const cx = this.spineX(z)
     const dx = (x - cx) / (6.6 * widthScale)
 
@@ -585,15 +710,17 @@ export class HollowField {
 
   /** Fast smooth macro SDF (`phi > 0` = air, `phi < 0` = rock) used to cull far-rock voxels before noise evaluation. */
   macroSample(x: number, y: number, z: number): number {
-    const widthScale = this.params.cavernWidth * this.widthBias
+    const widthScale = this.widthScale
     const cx = this.spineX(z)
 
     // Lateral wall envelope — seed spans + gallery flare; opens toward rear cascade chamber
     const galleryFlare = 1.7 * smoothstep(-0.5, -5.0, z) * (1.0 - smoothstep(-9.5, -13.5, z))
       * MathUtils.clamp(this.leftGalleryStrength, 0.2, 1.6)
-    const leftSpan = (this.wallLeftSpan + galleryFlare) * widthScale
+    // Gallery flares on its own side (opposite the hero boulder), the hero bench on the other
+    const heroBench = 0.9 * MathUtils.clamp(this.rightBenchStrength - 0.5, 0, 1.2)
+    const leftSpan = (this.wallLeftSpan + (this.heroSide > 0 ? galleryFlare : heroBench)) * widthScale
     const rightSpan = (this.wallRightSpan - 0.7 * smoothstep(-9.0, -16.0, z)
-      + 0.9 * MathUtils.clamp(this.rightBenchStrength - 0.5, 0, 1.2)) * widthScale
+      + (this.heroSide > 0 ? heroBench : galleryFlare)) * widthScale
     const wallLeft = x - (cx - leftSpan)
     const wallRight = (cx + rightSpan) - x
     const zBack = z - (-24.8)
@@ -614,14 +741,14 @@ export class HollowField {
     // Spill-shaping buttress between fire and framed cavern (alcove stays out of widescreen; light floods forward)
     const px = (x - this.spillPillar.x) / 1.35
     const pz = (z - this.spillPillar.z) / 1.15
-    const spillButtress = (Math.hypot(px, pz) - 1.0) * 1.35
+    const spillButtress = (Math.sqrt(px * px + pz * pz) - 1.0) * 1.35
     phi = smin(phi, spillButtress, 0.65)
 
     // Foreground hero-side repoussoir buttress near the camera pad
     const pose = this.cinemaPose
     const bx = (x - (pose.startX + this.heroSide * 4.1 * widthScale)) / 1.75
     const bz = (z - (pose.startZ - 5.4)) / 1.55
-    const sideButtress = (Math.hypot(bx, bz) - 1.0) * 1.5
+    const sideButtress = (Math.sqrt(bx * bx + bz * bz) - 1.0) * 1.5
     phi = smin(phi, sideButtress, 0.75)
 
     // Upper-rear karst skylight chimney punching cleanly out through `HOLLOW_MAX.y`
@@ -632,7 +759,7 @@ export class HollowField {
     const shaftCenterZ = MathUtils.lerp(shaftMouthZ, this.skylightCenter.z, tSky)
     const sx = (x - shaftCenterX) / (3.65 * skyScale * (1.08 - 0.16 * tSky))
     const sz = (z - shaftCenterZ) / (3.05 * skyScale * (1.08 - 0.14 * tSky))
-    const shaftVoid = (1.0 - Math.hypot(sx, sz)) * 3.2 * skyScale
+    const shaftVoid = (1.0 - Math.sqrt(sx * sx + sz * sz)) * 3.2 * skyScale
     const shaftBottomFade = smoothstep(1.4, 3.8, y)
     phi = smax(phi, shaftVoid - (1.0 - shaftBottomFade) * 6.0, 1.15)
 
@@ -640,7 +767,7 @@ export class HollowField {
   }
 
   /** Full geological karst SDF (`phi > 0` = open air, `phi < 0` = solid rock). */
-  sample(x: number, y: number, z: number, includeBoulders = false): number {
+  sample(x: number, y: number, z: number): number {
     let phi = this.macroSample(x, y, z)
 
     // Narrow-band geological relief: macro limestone beds (`~0.95 m`, well above voxel Nyquist) & karst scallops
@@ -666,32 +793,14 @@ export class HollowField {
       phi += karstMacro * 0.38 * rimProtect - strataDisplacement
     }
 
-    if (includeBoulders && this.boulderProxies.length > 0 && Math.abs(phi) < 3.2) {
-      for (let i = 0; i < this.boulderProxies.length; i++) {
-        const b = this.boulderProxies[i]
-        const dx = x - b.center.x
-        const dy = y - b.center.y
-        const dz = z - b.center.z
-        if (Math.abs(dx) > b.radii.x + 1.5 || Math.abs(dy) > b.radii.y + 1.5 || Math.abs(dz) > b.radii.z + 1.5) continue
-        const c = Math.cos(-b.rotationY)
-        const s = Math.sin(-b.rotationY)
-        const lx = (c * dx - s * dz) / b.radii.x
-        const ly = dy / b.radii.y
-        const lz = (s * dx + c * dz) / b.radii.z
-        const minR = Math.min(b.radii.x, b.radii.y, b.radii.z)
-        const dRock = (Math.sqrt(lx * lx + ly * ly + lz * lz) - 1.0) * minR
-        phi = smin(phi, dRock, b.fillet)
-      }
-    }
-
     return phi
   }
 
   /** Normalized surface normal pointing from solid rock into open cavern air (`+grad(phi)`). */
-  sampleNormal(x: number, y: number, z: number, target = new Vector3(), includeBoulders = false, eps = 0.06): Vector3 {
-    const gx = this.sample(x + eps, y, z, includeBoulders) - this.sample(x - eps, y, z, includeBoulders)
-    const gy = this.sample(x, y + eps, z, includeBoulders) - this.sample(x, y - eps, z, includeBoulders)
-    const gz = this.sample(x, y, z + eps, includeBoulders) - this.sample(x, y, z - eps, includeBoulders)
+  sampleNormal(x: number, y: number, z: number, target = new Vector3(), eps = 0.06): Vector3 {
+    const gx = this.sample(x + eps, y, z) - this.sample(x - eps, y, z)
+    const gy = this.sample(x, y + eps, z) - this.sample(x, y - eps, z)
+    const gz = this.sample(x, y, z + eps) - this.sample(x, y, z - eps)
     const len = Math.hypot(gx, gy, gz)
     if (len < 1e-7) return target.set(0, 1, 0)
     return target.set(gx / len, gy / len, gz / len)
@@ -702,7 +811,6 @@ export class HollowField {
     const startY = MathUtils.clamp((this.floorHeightAt(x, z, false) + this.ceilingHeightAt(x, z, false)) * 0.5, 0.8, 5.0)
     if (this.sample(x, startY, z) <= 0.05) return null
     let prevY = startY
-    let prevPhi = this.sample(x, prevY, z)
     for (let y = startY + 0.35; y <= HOLLOW_MAX.y - 0.25; y += 0.35) {
       const phi = this.sample(x, y, z)
       if (phi <= 0.0) {
@@ -716,9 +824,7 @@ export class HollowField {
         return 0.5 * (lo + hi)
       }
       prevY = y
-      prevPhi = phi
     }
-    void prevPhi
     return null
   }
 
@@ -749,90 +855,16 @@ export class HollowField {
     const wl = this.params.waterLevel
     const uRim = this.rimstoneCoord(x, z)
     const rimstone = (1.0 - smoothstep(0.85, 1.32, uRim)) * (1.0 - smoothstep(wl + 0.35, wl + 0.85, y))
-    const cascadeTravertine = smoothstep(-9.8, -12.5, z) * (1.0 - smoothstep(wl + 2.8, wl + 4.0, y)) * smoothstep(0.25, 0.75, normalY)
-    const leftFlowstone = smoothstep(-2.8, -5.2, x - this.spineX(z)) * smoothstep(wl + 0.6, wl + 1.3, y) * (1.0 - smoothstep(wl + 3.0, wl + 4.2, y)) * 0.65
-    const travertine = MathUtils.clamp(Math.max(cascadeTravertine, leftFlowstone, rimstone * 0.85), 0.0, 1.0)
+    const cascadeTravertine = smoothstep(this.cascadeStartZ + 0.2, this.cascadeStartZ - 2.5, z)
+      * (1.0 - smoothstep(wl + this.cascadeRise + 0.5, wl + this.cascadeRise + 1.7, y)) * smoothstep(0.25, 0.75, normalY)
+    const galleryFlowstone = smoothstep(2.8, 5.2, (x - this.spineX(z)) * this.gallerySide)
+      * smoothstep(wl + 0.6, wl + 1.3, y) * (1.0 - smoothstep(wl + 3.0, wl + 4.2, y)) * 0.65
+    const travertine = MathUtils.clamp(Math.max(cascadeTravertine, galleryFlowstone, rimstone * 0.85), 0.0, 1.0)
     const strata = MathUtils.clamp((1.0 - Math.abs(normalY) * 0.75) * (1.0 - rimstone * 0.8), 0.0, 1.0)
 
     const shorelineCapillary = 1.0 - smoothstep(wl - 0.05, wl + 0.72, y)
     const seepStreaks = smoothstep(0.2, 0.75, this.noise3(x * 0.85, y * 0.18, z * 0.85)) * 0.45
     const wetness = MathUtils.clamp(Math.max(shorelineCapillary, rimstone * 0.9, cascadeTravertine * 0.75, seepStreaks), 0.0, 1.0)
     return {strata, travertine, rimstone, wetness}
-  }
-
-  /**
-   * Recomputes the GPU `96×56×128` `HalfFloatType` 3D SDF & gradient volume in place (`sdfTexture.needsUpdate = true`),
-   * uniting the karst cavern shell and static boulder proxies so TSL shaders never recompile on parameter edits.
-   */
-  rebuildVolumeTexture() {
-    const w = SDF_VOL_W
-    const h = SDF_VOL_H
-    const d = SDF_VOL_D
-    const phiGrid = new Float32Array(w * h * d)
-
-    const minX = HOLLOW_MIN.x
-    const minY = HOLLOW_MIN.y
-    const minZ = HOLLOW_MIN.z
-    const stepX = HOLLOW_SIZE.x / (w - 1)
-    const stepY = HOLLOW_SIZE.y / (h - 1)
-    const stepZ = HOLLOW_SIZE.z / (d - 1)
-
-    let idx = 0
-    for (let k = 0; k < d; k++) {
-      const z = minZ + k * stepZ
-      for (let j = 0; j < h; j++) {
-        const y = minY + j * stepY
-        for (let i = 0; i < w; i++) {
-          phiGrid[idx++] = this.sample(minX + i * stepX, y, z, true)
-        }
-      }
-    }
-
-    const inv2X = 1.0 / (2.0 * stepX)
-    const inv2Y = 1.0 / (2.0 * stepY)
-    const inv2Z = 1.0 / (2.0 * stepZ)
-    const strideY = w
-    const strideZ = w * h
-    const out = this.volumeData
-    const toHalf = DataUtils.toHalfFloat
-
-    let p = 0
-    for (let k = 0; k < d; k++) {
-      const km = k > 0 ? k - 1 : 0
-      const kp = k < d - 1 ? k + 1 : d - 1
-      const zScale = k > 0 && k < d - 1 ? inv2Z : 1.0 / stepZ
-      for (let j = 0; j < h; j++) {
-        const jm = j > 0 ? j - 1 : 0
-        const jp = j < h - 1 ? j + 1 : h - 1
-        const yScale = j > 0 && j < h - 1 ? inv2Y : 1.0 / stepY
-        for (let i = 0; i < w; i++) {
-          const im = i > 0 ? i - 1 : 0
-          const ip = i < w - 1 ? i + 1 : w - 1
-          const xScale = i > 0 && i < w - 1 ? inv2X : 1.0 / stepX
-
-          const centerIdx = i + j * strideY + k * strideZ
-          const phi = phiGrid[centerIdx]
-          const gx = (phiGrid[ip + j * strideY + k * strideZ] - phiGrid[im + j * strideY + k * strideZ]) * xScale
-          const gy = (phiGrid[i + jp * strideY + k * strideZ] - phiGrid[i + jm * strideY + k * strideZ]) * yScale
-          const gz = (phiGrid[i + j * strideY + kp * strideZ] - phiGrid[i + j * strideY + km * strideZ]) * zScale
-          const len = Math.hypot(gx, gy, gz)
-          const nx = len > 1e-6 ? gx / len : 0.0
-          const ny = len > 1e-6 ? gy / len : 1.0
-          const nz = len > 1e-6 ? gz / len : 0.0
-
-          out[p] = toHalf(nx)
-          out[p + 1] = toHalf(ny)
-          out[p + 2] = toHalf(nz)
-          out[p + 3] = toHalf(MathUtils.clamp(phi, -12.0, 12.0))
-          p += 4
-        }
-      }
-    }
-
-    this.sdfTexture.needsUpdate = true
-  }
-
-  dispose() {
-    this.sdfTexture.dispose()
   }
 }

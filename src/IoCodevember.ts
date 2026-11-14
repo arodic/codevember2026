@@ -13,55 +13,48 @@ import { CaptureOptions, CaptureResult, FrameCapture, checkCaptureOptions, pickC
 const editorLayout = new Layout({
   child: {
       type: 'split',
+      orientation: 'horizontal',
       children: [
         {
           type: 'panel',
-          size: '240px',
+          size: '180px',
           tabs: [
             { id: 'Scene' }
           ]
         }, {
           type: 'split',
+          orientation: 'vertical',
           size: 'auto',
           children: [
             {
-              type: 'panel',
-              tabs: [
-                { id: 'Front', selected: true },
-                { id: 'Back' }
+              type: 'split',
+              orientation: 'horizontal',
+              children: [
+                {
+                  type: 'panel',
+                  tabs: [
+                    { id: 'Top', selected: true },
+                    { id: 'Bottom' },
+                    { id: 'Front' },
+                    ]
+                  }, {
+                    type: 'panel',
+                    tabs: [
+                      { id: 'Perspective', selected: true },
+                      { id: 'UV' },
+                  ]
+                }
               ]
             }, {
               type: 'panel',
               tabs: [
-                { id: 'Perspective', selected: true },
-                { id: 'Right' },
-                { id: 'Left' }
-              ]
-            }
-          ],
-          orientation: 'vertical'
-      }, {
-          type: 'split',
-          size: 'auto',
-          children: [
-            {
-              type: 'panel',
-              tabs: [
-                { id: 'Top', selected: true },
-                { id: 'Bottom' }
-              ]
-            }, {
-              type: 'panel',
-              tabs: [
-                { id: 'UV' },
                 { id: 'Active', selected: true },
               ]
             }
           ],
-          orientation: 'vertical'
       }, {
         type: 'panel',
-        size: '280px',
+        size: '220px',
         tabs: [
           { id: 'Document', selected: true  },
           { id: 'Inspector' },
@@ -81,6 +74,7 @@ const DOCUMENTS: Record<string, () => Promise<Document>> = {
   // Moss: () => import('./days/Moss.js').then(module => new module.Moss()),
   // Orrery: () => import('./days/Orrery.js').then(module => new module.Orrery()),
   Hollow: () => import('./days/Hollow.js').then(module => new module.Hollow()),
+  HollowMaterials: () => import('./days/HollowMaterials.js').then(module => new module.HollowMaterials()),
   // Tesseract: () => import('./days/Tesseract.js').then(module => new module.Tesseract()),
   // Membrane: () => import('./days/Membrane.js').then(module => new module.Membrane()),
   // Caustic: () => import('./days/Caustic.js').then(module => new module.Caustic()),

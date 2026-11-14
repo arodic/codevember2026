@@ -1,29 +1,34 @@
 import {
-  ACESFilmicToneMapping, Box3, BufferGeometry, Color, DoubleSide, Group, MathUtils, Mesh, MeshBasicNodeMaterial,
-  MeshPhysicalNodeMaterial, PerspectiveCamera, PlaneGeometry, UniformNode, Vector3, WebGPURenderer,
+  ACESFilmicToneMapping, Box3, BufferGeometry, Color, Group, MathUtils, Mesh, PerspectiveCamera, UniformNode, Vector3,
+  WebGPURenderer,
 } from 'three/webgpu'
-import {color, mix, positionLocal, saturate, uniform} from 'three/tsl'
+import {uniform} from 'three/tsl'
 import {Register, Property, Field, div} from '@io-gui/core'
-import {Document, DocumentProps, FrameTarget, Timeline} from '@io-gui/three'
+import {Bloom, Document, DocumentProps, FrameTarget, Timeline} from '@io-gui/three'
 import {registerEditor} from '@io-gui/editors'
 import {ioNumberSlider} from '@io-gui/sliders'
 import {ioOptionSelect, Menu} from '@io-gui/menus'
-import {
-  DEFAULT_HOLLOW_PARAMS, HollowField, RIMSTONE_POOL_STEP, createHollowRandom,
-} from './hollow/HollowField.js'
-import {
-  buildHollowLakeGeometry, buildHollowShellGeometry, buildRimstonePoolGeometry,
-} from './hollow/HollowShell.js'
-import {buildHollowRocks} from './hollow/HollowRocks.js'
+import type {CaptureDefaults, CaptureOptions} from '../Capture.js'
+import {TimelineFade} from '../TimelineFade.js'
+import {DEFAULT_HOLLOW_PARAMS, HollowField, createHollowRandom} from './hollow/HollowField.js'
+import {buildHollowLakeGeometry, buildRimstonePoolGeometry} from './hollow/HollowLake.js'
+import {placeHollowRocks} from './hollow/HollowRocks.js'
 import {buildHollowSpeleothems} from './hollow/HollowSpeleothems.js'
-import {DEFAULT_HOLLOW_LIGHTS, HollowLighting} from './hollow/HollowLighting.js'
-import {HollowWater} from './hollow/HollowWater.js'
-import {HollowVolumetrics} from './hollow/HollowVolumetrics.js'
+import {HollowSculptPool} from './hollow/HollowSculptPool.js'
+import {SCULPT_CALCITE_GROUP, SCULPT_ROCK_GROUP, clusterSurface} from './hollow/HollowSculpt.js'
 import {
-  HollowLightMappedMaterial, applyHollowRockEnv, bakeRockDetailAtlas, bakeTravertineAtlas, createHollowRockMaterial,
+  DEFAULT_HOLLOW_LIGHTS, HOLLOW_GI_LAYER, HollowLighting, createHollowLightUniforms,
+} from './hollow/HollowLighting.js'
+import {HollowWater, HollowWaterMaterial} from './hollow/HollowWater.js'
+import {HollowAtmosphere} from './hollow/HollowAtmosphere.js'
+import {
+  HollowLitMaterial, bakeRockDetailAtlas, bakeTravertineAtlas, createHollowRockMaterial,
 } from './hollow/HollowMaterial.js'
 
 const DURATION = 90
+const FADE_SECONDS = 2.5
+/** Cluster size (`m`) of the cave's stand-in for the GI voxelizer: under its sub-voxels (`~11 cm`). */
+const GI_PROXY_CELL = 0.06
 
 export const HOLLOW_CAMERA_MODES = ['Cinema', 'Cutaway Overview'] as const
 export type HollowCameraMode = typeof HOLLOW_CAMERA_MODES[number]
@@ -39,11 +44,13 @@ const CUTAWAY_POSE = {
 
 /**
  * Codevember day 7, **Hollow**:
- * Procedural karst cavern for `2.39:1` widescreen — Phase 2 `LightProbeGrid` GI, static fire area (bake) + point
- * (realtime), planar lake, volumetric skylight shafts, wet clearcoat limestone. Bloom/fade off while tuning lights.
+ * Procedural karst cavern for `2.39:1` widescreen, lit physically: a shadowed sun down the skylight chimney, the sky
+ * seen through it and a shadowed fire flickering behind the camera, nothing else. Diffuse GI is VXGI baked into light
+ * maps per source (so the light levels stay live); a refracting, absorbing lake mirrors the cave and ripples under
+ * falling drops on the GPU; the mist is a participating medium lit by the same sources.
  */
 @Register
-export class Hollow extends Document {
+export class Hollow extends Document implements CaptureDefaults {
 
   @Property({type: String, value: 'Cinema'})
   declare cameraMode: HollowCameraMode
@@ -108,48 +115,52 @@ export class Hollow extends Document {
   @Property({type: Number, value: 10})
   declare boulderCount: number
 
-  /** Read-only dual-grid GI bake progress (`0..1`). */
+  /** Read-only GI bake progress (`0..1`). */
   @Property({type: Number, value: 0})
   declare bakeProgress: number
 
-  @Property({type: Number, value: DEFAULT_HOLLOW_LIGHTS.skylightIntensity})
-  declare skylightIntensity: number
+  /** Sun illuminance down the chimney (scene units, ~1 klx each). */
+  @Property({type: Number, value: DEFAULT_HOLLOW_LIGHTS.sunIlluminance})
+  declare sunIlluminance: number
 
-  @Property({type: Number, value: DEFAULT_HOLLOW_LIGHTS.skyAreaIntensity})
-  declare skyAreaIntensity: number
+  /** Luminance of the sky seen through the chimney. */
+  @Property({type: Number, value: DEFAULT_HOLLOW_LIGHTS.skyLuminance})
+  declare skyLuminance: number
 
-  @Property({type: Number, value: DEFAULT_HOLLOW_LIGHTS.firePointIntensity})
-  declare firePointIntensity: number
+  /** Mean luminous intensity of the fire behind the camera. */
+  @Property({type: Number, value: DEFAULT_HOLLOW_LIGHTS.fireIntensity})
+  declare fireIntensity: number
 
-  @Property({type: Number, value: DEFAULT_HOLLOW_LIGHTS.fireAreaIntensity})
-  declare fireAreaIntensity: number
-
-  @Property({type: Number, value: DEFAULT_HOLLOW_LIGHTS.fillIntensity})
-  declare fillIntensity: number
-
-  @Property({type: Number, value: DEFAULT_HOLLOW_LIGHTS.probeIntensity})
-  declare probeIntensity: number
+  /** Scattering coefficient (`1/m`) of the mist over the water. */
+  @Property({type: Number, value: 0.03})
+  declare mistDensity: number
 
   declare private camera: PerspectiveCamera
   declare private field: HollowField
   declare private hollowLighting: HollowLighting
   declare private water: HollowWater
-  declare private volumetrics: HollowVolumetrics
+  declare private atmosphere: HollowAtmosphere
   declare private caveGroup: Group
-  declare private shellMesh: Mesh<BufferGeometry, HollowLightMappedMaterial>
-  declare private rocksMesh: Mesh<BufferGeometry, HollowLightMappedMaterial>
-  declare private speleothemsMesh: Mesh<BufferGeometry, HollowLightMappedMaterial>
-  declare private lakeMesh: Mesh<BufferGeometry, MeshPhysicalNodeMaterial>
-  declare private rimstonePoolMesh: Mesh<BufferGeometry, MeshPhysicalNodeMaterial>
-  declare private skyPortalMesh: Mesh<PlaneGeometry, MeshBasicNodeMaterial>
-  declare private rockMaterial: HollowLightMappedMaterial
+  /** The light-mapped meshes (a light map texel per vertex). */
+  declare private litGroup: Group
+  /** The cave with its boulders, dripstones and draperies: one surface (`HollowSculpt`), rock and calcite groups. */
+  declare private caveMesh: Mesh<BufferGeometry, HollowLitMaterial[]>
+  /** The cave as the GI voxelizer sees it: coarser (`clusterSurface`), in its layer only. */
+  declare private giMesh: Mesh<BufferGeometry, HollowLitMaterial>
+  declare private sculptPool: HollowSculptPool
+  declare private lakeMesh: Mesh<BufferGeometry, HollowWaterMaterial>
+  declare private rimstonePoolMesh: Mesh<BufferGeometry, HollowWaterMaterial>
+  /** The rock; the translucent calcite of the drapery sheets. */
+  declare private rockMaterial: HollowLitMaterial
+  declare private calciteMaterial: HollowLitMaterial
   declare private styleModeUniform: UniformNode<'float', number>
   declare private waterLevelUniform: UniformNode<'float', number>
   declare private dripEmitters: Vector3[]
   declare private caveDirty: boolean
-  declare private envApplied: boolean
+  /** The workers are meshing a new cave (no bake until it arrives). */
+  declare private sculpting: boolean
+  declare private envVersion: number
   declare private _poseAppliedForSeed: number | undefined
-  declare private _lastAnimateTime: number
 
   @Field(null)
   declare private _frameTarget: FrameTarget | null
@@ -157,10 +168,12 @@ export class Hollow extends Document {
   constructor(args?: DocumentProps) {
     super({
       toneMapping: ACESFilmicToneMapping,
-      toneMappingExposure: 1.05,
+      toneMappingExposure: 0.8,
       timeline: new Timeline({autoplay: true, duration: DURATION, loop: true}),
-      // Bloom + TimelineFade off while lighting is tuned
-      effects: [],
+      effects: [
+        new Bloom({strength: 0.18, radius: 0.45, threshold: 1.1}),
+        new TimelineFade({fadeIn: FADE_SECONDS, fadeOut: FADE_SECONDS, color: new Color(0, 0, 0)}),
+      ],
       ...args,
     })
 
@@ -168,7 +181,7 @@ export class Hollow extends Document {
     this.camera.name = 'Camera'
     this.activeCamera = this.camera
 
-    // Pure black so zero-light bakes / isolation aren't lifted by a teal clear color
+    // The cave is closed but for the chimney, whose mouth the sky portal covers: nothing should show the background
     this.scene.background = new Color(0x000000)
 
     this.field = new HollowField()
@@ -176,50 +189,51 @@ export class Hollow extends Document {
     this.waterLevelUniform = uniform(this.waterLevel)
     this.dripEmitters = []
     this.caveDirty = false
-    this.envApplied = false
-    this._lastAnimateTime = 0
+    this.sculpting = false
+    this.envVersion = -1
     this.bakeProgress = 0
 
-    this.hollowLighting = new HollowLighting(this.field, this.scene)
-    this.water = new HollowWater(this.field, this.hollowLighting.skyEmitter)
-    this.volumetrics = new HollowVolumetrics(this.waterLevelUniform, this.hollowLighting.skyEmitter)
-    // Fog off while lighting is tuned
-    this.scene.fogNode = null
-
-    this.skyPortalMesh = this.createSkyPortal()
-    this.scene.add(this.skyPortalMesh)
-    this.scene.add(this.volumetrics.shaftMesh)
+    const lightUniforms = createHollowLightUniforms()
+    this.atmosphere = new HollowAtmosphere(lightUniforms, this.waterLevelUniform)
+    this.atmosphere.density.value = this.mistDensity
+    this.atmosphere.applyFog(this.scene)
+    this.hollowLighting = new HollowLighting(this.field, this.scene, this.atmosphere, lightUniforms)
+    this.water = new HollowWater(this.field, this.atmosphere)
     this.scene.add(this.water.dropletMesh)
 
     const rockAtlas = bakeRockDetailAtlas(1024)
     const travertineAtlas = bakeTravertineAtlas(1024)
-    this.rockMaterial = createHollowRockMaterial({
-      field: this.field,
-      lighting: this.hollowLighting,
+    const rock = {
       rockAtlas,
       travertineAtlas,
       styleMode: this.styleModeUniform,
-      waterLevel: this.waterLevelUniform,
+      lightMapNode: this.hollowLighting.lightMapNode,
+    }
+    this.rockMaterial = createHollowRockMaterial({...rock, name: 'Hollow Karst Rock'})
+    this.calciteMaterial = createHollowRockMaterial({
+      ...rock,
+      name: 'Hollow Calcite',
+      translucency: {atmosphere: this.atmosphere, lights: lightUniforms},
     })
 
     this.caveGroup = new Group()
     this.caveGroup.name = 'Hollow Cavern'
     this.scene.add(this.caveGroup)
+    this.litGroup = new Group()
+    this.litGroup.name = 'Light-Mapped Rock'
 
-    this.shellMesh = new Mesh(new BufferGeometry(), this.rockMaterial)
-    this.shellMesh.name = 'Cavern Shell'
-    this.shellMesh.castShadow = true
-    this.shellMesh.receiveShadow = true
-
-    this.rocksMesh = new Mesh(new BufferGeometry(), this.rockMaterial)
-    this.rocksMesh.name = 'Cleaved Boulders'
-    this.rocksMesh.castShadow = true
-    this.rocksMesh.receiveShadow = true
-
-    this.speleothemsMesh = new Mesh(new BufferGeometry(), this.rockMaterial)
-    this.speleothemsMesh.name = 'Speleothems'
-    this.speleothemsMesh.castShadow = true
-    this.speleothemsMesh.receiveShadow = true
+    const materials: HollowLitMaterial[] = []
+    materials[SCULPT_ROCK_GROUP] = this.rockMaterial
+    materials[SCULPT_CALCITE_GROUP] = this.calciteMaterial
+    this.caveMesh = new Mesh(new BufferGeometry(), materials)
+    this.caveMesh.name = 'Cavern'
+    this.caveMesh.castShadow = true
+    this.caveMesh.receiveShadow = true
+    this.giMesh = new Mesh(new BufferGeometry(), this.rockMaterial)
+    this.giMesh.name = 'Cavern GI Proxy'
+    this.giMesh.layers.set(HOLLOW_GI_LAYER)
+    this.litGroup.add(this.caveMesh, this.giMesh)
+    this.sculptPool = new HollowSculptPool()
 
     this.lakeMesh = new Mesh(new BufferGeometry(), this.water.lakeMaterial)
     this.lakeMesh.name = 'Meandering Lake'
@@ -231,13 +245,7 @@ export class Hollow extends Document {
     this.rimstonePoolMesh.name = 'Rimstone Pool'
     this.rimstonePoolMesh.receiveShadow = true
 
-    this.caveGroup.add(
-      this.shellMesh,
-      this.rocksMesh,
-      this.speleothemsMesh,
-      this.lakeMesh,
-      this.rimstonePoolMesh,
-    )
+    this.caveGroup.add(this.litGroup, this.lakeMesh, this.rimstonePoolMesh)
 
     const frameBox = new Box3(new Vector3(-10, -1.5, -23), new Vector3(8, 8.5, 7))
     this._frameTarget = new Mesh(new BufferGeometry().setFromPoints([frameBox.min, frameBox.max]))
@@ -250,27 +258,17 @@ export class Hollow extends Document {
     return this._frameTarget
   }
 
-  override onRendererInitialized(renderer: WebGPURenderer) {
-    this.hollowLighting.initRenderer(renderer)
-    this.hollowLighting.requestBake()
-    this.envApplied = false
-    this.bakeProgress = 0
+  /** Six seconds of preroll, so drops are falling and ripples spreading by the first saved frame. */
+  getCaptureDefaults(): CaptureOptions {
+    return {preroll: 6}
   }
 
-  private createSkyPortal() {
-    const mat = new MeshBasicNodeMaterial({side: DoubleSide})
-    mat.fog = false
-    const radial = saturate(positionLocal.xy.length().div(5.5))
-    const skyCore = color(0x96cfdc).mul(3.4)
-    const skyEdge = color(0x3998d1).mul(1.8)
-    // Scales with sky light levels — off when both skylight + sky area are zero
-    mat.colorNode = mix(skyCore, skyEdge, radial).mul(this.hollowLighting.skyEmitter)
-
-    const mesh = new Mesh(new PlaneGeometry(14, 14), mat)
-    mesh.name = 'Skylight Portal'
-    mesh.rotation.x = Math.PI / 2
-    mesh.userData.selectable = false
-    return mesh
+  override onRendererInitialized(renderer: WebGPURenderer) {
+    this.hollowLighting.initRenderer(renderer)
+    // Also while the cave is on its way: the bake creates the mist's and the GI's volumes the materials sample (it
+    // bakes again when the cave arrives)
+    this.hollowLighting.requestBake()
+    this.bakeProgress = 0
   }
 
   private markCaveDirty() {
@@ -321,12 +319,7 @@ export class Hollow extends Document {
   }
 
   rebakeLighting() {
-    this.applyLightLevels()
-    // Drop previous IBL immediately so the frame (and next bake) don't keep old light
-    applyHollowRockEnv(this.rockMaterial, null, null, this.field)
-    this.hollowLighting.clearEnvMaps()
     this.hollowLighting.requestBake()
-    this.envApplied = false
     this.bakeProgress = 0
     this.notify({kind: 'other'})
   }
@@ -334,35 +327,33 @@ export class Hollow extends Document {
   private applyLightLevels() {
     if (!this.hollowLighting) return
     this.hollowLighting.setLevels({
-      skylightIntensity: this.skylightIntensity,
-      skyAreaIntensity: this.skyAreaIntensity,
-      firePointIntensity: this.firePointIntensity,
-      fireAreaIntensity: this.fireAreaIntensity,
-      fillIntensity: this.fillIntensity,
-      probeIntensity: this.probeIntensity,
+      sunIlluminance: this.sunIlluminance,
+      skyLuminance: this.skyLuminance,
+      fireIntensity: this.fireIntensity,
     })
-    if (this.skyPortalMesh) {
-      const skyOn = this.hollowLighting.skyLightsOn
-      this.skyPortalMesh.visible = skyOn
-      if (this.volumetrics?.shaftMesh) this.volumetrics.shaftMesh.visible = skyOn
-    }
+    this.notify({kind: 'other'})
   }
 
-  skylightIntensityChanged() { this.applyLightLevels(); this.notify({kind: 'other'}) }
-  skyAreaIntensityChanged() { this.applyLightLevels(); this.notify({kind: 'other'}) }
-  firePointIntensityChanged() { this.applyLightLevels(); this.notify({kind: 'other'}) }
-  fireAreaIntensityChanged() { this.applyLightLevels(); this.notify({kind: 'other'}) }
-  fillIntensityChanged() { this.applyLightLevels(); this.notify({kind: 'other'}) }
-  probeIntensityChanged() { this.applyLightLevels(); this.notify({kind: 'other'}) }
+  sunIlluminanceChanged() { this.applyLightLevels() }
+  skyLuminanceChanged() { this.applyLightLevels() }
+  fireIntensityChanged() { this.applyLightLevels() }
+  mistDensityChanged() {
+    if (!this.atmosphere) return
+    this.atmosphere.density.value = this.mistDensity
+    this.notify({kind: 'other'})
+  }
 
   goFullscreen() {
     this.dispatch('go-fullscreen', {}, true)
   }
 
+  /**
+   * Places the bodies and meshes the cave on the sculpt workers (seconds); the old cave stays until the new one
+   * arrives, then everything that follows the field (water, lights, mist, camera pose) switches with it.
+   */
   private rebuildCave() {
     this.caveDirty = false
-
-    this.field.configure({
+    const params = {
       seed: this.seed,
       cavernWidth: this.cavernWidth,
       vaultHeight: this.vaultHeight,
@@ -372,28 +363,33 @@ export class Hollow extends Document {
       terraceSteps: this.terraceSteps,
       rimstoneScale: this.rimstoneScale,
       waterLevel: this.waterLevel,
-    })
-
-    const rockSet = buildHollowRocks(this.field, Math.round(this.boulderCount))
-    this.field.setBoulderProxies(rockSet.proxies)
-    this.field.rebuildVolumeTexture()
-
-    const nextShellGeo = buildHollowShellGeometry(this.field)
-    this.shellMesh.geometry.dispose()
-    this.shellMesh.geometry = nextShellGeo
-
-    this.rocksMesh.geometry.dispose()
-    this.rocksMesh.geometry = rockSet.geometry
-
-    const speleothems = buildHollowSpeleothems(this.field, {
+    }
+    // Placed against a field of their own: this one keeps serving the cave on screen meanwhile
+    const field = new HollowField(params)
+    const speleothems = buildHollowSpeleothems(field, {
       stalactiteDensity: this.stalactiteDensity,
       stalagmiteDensity: this.stalagmiteDensity,
       draperyScale: this.draperyScale,
     })
-    this.speleothemsMesh.geometry.dispose()
-    this.speleothemsMesh.geometry = speleothems.geometry
-    this.dripEmitters = speleothems.dripEmitters
+    const bodies = [...placeHollowRocks(field, Math.round(this.boulderCount)), ...speleothems.bodies]
+    this.bakeProgress = 0
+    this.sculpting = true
+    this.sculptPool.build(field, bodies).then((cave) => {
+      if (!cave) return
+      this.sculpting = false
+      this.field.configure(params)
+      this.dripEmitters = speleothems.dripEmitters
+      this.caveMesh.geometry.dispose()
+      this.caveMesh.geometry = cave
+      this.giMesh.geometry.dispose()
+      this.giMesh.geometry = clusterSurface(cave, GI_PROXY_CELL)
+      this.hollowLighting.setLightMapped([this.caveMesh])
+      this.applyField()
+    }, (error) => console.error(error))
+  }
 
+  /** Everything that follows the field: water, lights, mist, the seed's camera pose; then a fresh bake. */
+  private applyField() {
     const nextLakeGeo = buildHollowLakeGeometry(this.field)
     this.lakeMesh.geometry.dispose()
     this.lakeMesh.geometry = nextLakeGeo
@@ -403,13 +399,9 @@ export class Hollow extends Document {
     this.rimstonePoolMesh.geometry = nextRimGeo
     this.rimstonePoolMesh.visible = this.rimstoneScale > 0.05
 
-    this.water.syncToField(this.dripEmitters)
-    this.applyLightLevels()
+    this.water.syncToField(this.dripEmitters, this.timeline.duration)
     this.hollowLighting.syncToField()
-    this.volumetrics.syncToField(this.field)
-
-    const skyPos = this.field.skylightCenter
-    this.skyPortalMesh.position.set(skyPos.x, skyPos.y + 1.45, skyPos.z)
+    this.atmosphere.syncToField(this.field)
 
     const pose = this.field.cinemaPose
     if (!this._poseAppliedForSeed || this._poseAppliedForSeed !== this.seed) {
@@ -420,20 +412,11 @@ export class Hollow extends Document {
       this.trackLookDrift = Math.round(this.field.cinemaTracks.lookDrift * 20) / 20
       this._poseAppliedForSeed = this.seed
     }
+    this.updateCamera(this.timeline.currentTime)
 
     this.hollowLighting.requestBake()
-    this.envApplied = false
     this.bakeProgress = 0
-
-    void RIMSTONE_POOL_STEP
-  }
-
-  private setBakeVisibility(baking: boolean) {
-    // Shafts / droplets out of probe captures. Portal only when sky lights are on.
-    const skyOn = this.hollowLighting.skyLightsOn
-    this.skyPortalMesh.visible = skyOn
-    this.volumetrics.shaftMesh.visible = !baking && skyOn
-    this.water.dropletMesh.visible = !baking
+    this.notify({kind: 'geometry'})
   }
 
   private updateCamera(time: number) {
@@ -479,52 +462,52 @@ export class Hollow extends Document {
 
   override onAnimate(delta: number, time: number) {
     this.updateCamera(time)
-    // Prefer timeline delta; fall back to wall-clock when scrubbing jumps
-    const dt = delta > 0 ? delta : Math.max(0, time - this._lastAnimateTime)
-    this.water.update(time, dt)
-    this._lastAnimateTime = time
+    const duration = this.timeline.duration
+    this.hollowLighting.updateFire(time, duration)
+    this.water.animate(delta, time, duration)
   }
 
-  override onBeforeDraw(renderer: WebGPURenderer) {
+  override onBeforeDraw(renderer: WebGPURenderer, delta: number) {
     if (this.caveDirty) {
       this.rebuildCave()
       this.updateCamera(this.timeline.currentTime)
     }
 
-    if (this.hollowLighting.baking) {
-      this.setBakeVisibility(true)
-      this.hollowLighting.stepBake(renderer)
-      this.bakeProgress = this.hollowLighting.bakeProgress
-      this.setBakeVisibility(false)
+    // The indirect light at this frame's levels first: the probe capture below renders with it
+    this.atmosphere.update(renderer, this.timeline.currentTime, this.timeline.duration)
+
+    const lighting = this.hollowLighting
+    const wasBaking = lighting.baking
+    lighting.stepBake(renderer)
+    if (wasBaking && !this.sculpting) {
+      this.bakeProgress = lighting.bakeProgress
       this.notify({kind: 'other'})
-    } else if (this.hollowLighting.bakeStage === 'done' && !this.envApplied) {
-      applyHollowRockEnv(
-        this.rockMaterial,
-        this.hollowLighting.lakeEnvMap?.texture ?? null,
-        this.hollowLighting.skyEnvMap?.texture ?? null,
-        this.field,
-      )
-      this.envApplied = true
-      this.bakeProgress = 1
+    }
+    if (lighting.envVersion !== this.envVersion) {
+      this.envVersion = lighting.envVersion
+      const lake = lighting.lakeEnvMap ? {map: lighting.lakeEnvMap.texture, probe: lighting.lakeProbe} : null
+      const sky = lighting.skyEnvMap ? {map: lighting.skyEnvMap.texture, probe: lighting.skyProbe} : null
+      const lit = [this.rockMaterial, this.calciteMaterial]
+      for (const material of [...lit, this.water.rimstoneMaterial, this.water.dropletMaterial]) {
+        material.setEnv(lake, sky)
+      }
       this.notify({kind: 'material'})
     }
 
-    this.water.onBeforeDraw(renderer)
+    this.water.step(renderer, delta)
   }
 
   override dispose() {
-    this.shellMesh.geometry.dispose()
-    this.rocksMesh.geometry.dispose()
-    this.speleothemsMesh.geometry.dispose()
+    this.sculptPool.dispose()
+    this.caveMesh.geometry.dispose()
+    this.giMesh.geometry.dispose()
     this.lakeMesh.geometry.dispose()
     this.rimstonePoolMesh.geometry.dispose()
     this.rockMaterial.dispose()
-    this.skyPortalMesh.geometry.dispose()
-    this.skyPortalMesh.material.dispose()
+    this.calciteMaterial.dispose()
     this.water.dispose()
-    this.volumetrics.dispose()
+    this.atmosphere.dispose()
     this.hollowLighting.dispose()
-    this.field.dispose()
     super.dispose()
   }
 }
@@ -553,27 +536,22 @@ registerEditor(Hollow, {
     ['stalagmiteDensity', ioNumberSlider({min: 0.0, max: 2.0, step: 0.05}), {label: 'stalagmites'}],
     ['draperyScale', ioNumberSlider({min: 0.0, max: 1.8, step: 0.05}), {label: 'draperies'}],
     ['boulderCount', ioNumberSlider({min: 0, max: 24, step: 1}), {label: 'boulders'}],
-    ['skylightIntensity', ioNumberSlider({min: 0, max: 20, step: 0.1}), {label: 'sky dir'}],
-    ['skyAreaIntensity', ioNumberSlider({min: 0, max: 60, step: 0.5}), {label: 'sky area'}],
-    ['firePointIntensity', ioNumberSlider({min: 0, max: 120, step: 1}), {label: 'fire point'}],
-    ['fireAreaIntensity', ioNumberSlider({min: 0, max: 80, step: 0.5}), {label: 'fire area'}],
-    ['fillIntensity', ioNumberSlider({min: 0, max: 2, step: 0.02}), {label: 'fill'}],
-    ['probeIntensity', ioNumberSlider({min: 0, max: 3, step: 0.05}), {label: 'GI'}],
+    ['sunIlluminance', ioNumberSlider({min: 0, max: 200, step: 1}), {label: 'sun'}],
+    ['skyLuminance', ioNumberSlider({min: 0, max: 20, step: 0.1}), {label: 'sky'}],
+    ['fireIntensity', ioNumberSlider({min: 0, max: 800, step: 5}), {label: 'fire'}],
+    ['mistDensity', ioNumberSlider({min: 0, max: 0.2, step: 0.002}), {label: 'mist'}],
   ],
   groups: {
     Main: ['goFullscreen', 'cameraMode', 'blockoutStyle', 'seed', 'randomizeSeed', 'rebakeLighting', 'bakeProgress'],
-    Lights: [
-      'skylightIntensity', 'skyAreaIntensity', 'firePointIntensity', 'fireAreaIntensity', 'fillIntensity',
-      'probeIntensity',
-    ],
+    Lights: ['sunIlluminance', 'skyLuminance', 'fireIntensity', 'mistDensity'],
     Camera: ['cameraFov', 'cameraHeight', 'trackForward', 'trackLateral', 'trackLookDrift'],
     Cavern: ['cavernWidth', 'vaultHeight', 'meander', 'strataStrength', 'skylightSize', 'terraceSteps'],
     Features: ['waterLevel', 'rimstoneScale', 'stalactiteDensity', 'stalagmiteDensity', 'draperyScale', 'boulderCount'],
     Hidden: [
-      'camera', 'field', 'hollowLighting', 'water', 'volumetrics', 'caveGroup', 'shellMesh', 'rocksMesh',
-      'speleothemsMesh', 'lakeMesh', 'rimstonePoolMesh', 'skyPortalMesh', 'rockMaterial', 'styleModeUniform',
-      'waterLevelUniform', 'dripEmitters', 'caveDirty', 'envApplied', '_poseAppliedForSeed', '_lastAnimateTime',
-      '_frameTarget',
+      'camera', 'field', 'hollowLighting', 'water', 'atmosphere', 'caveGroup', 'litGroup', 'caveMesh', 'giMesh',
+      'sculptPool', 'lakeMesh', 'rimstonePoolMesh', 'rockMaterial', 'calciteMaterial',
+      'styleModeUniform', 'waterLevelUniform',
+      'dripEmitters', 'caveDirty', 'sculpting', 'envVersion', '_poseAppliedForSeed', '_frameTarget',
     ],
   },
 })
