@@ -1,37 +1,55 @@
 import {
-  ComputeNode, HalfFloatType, InstancedMesh, LinearFilter, Matrix4, Node, NodeBuilder, SphereGeometry, StorageTexture,
-  Vector2, Vector3, Vector4, WebGPURenderer,
+  BufferGeometry, ComputeNode, DoubleSide, HalfFloatType, InstancedMesh, LinearFilter, Matrix4, Mesh, Node, NodeBuilder,
+  NodeMaterial, OrthographicCamera, RenderTarget, RendererUtils, Scene, SphereGeometry, StorageTexture, Vector2, Vector3,
+  Vector4, WebGPURenderer,
 } from 'three/webgpu'
 import {
-  Fn, If, Loop, attribute, cameraPosition, dot, exp, float, instanceIndex, instancedArray, int, ivec2, mix, normalView,
-  normalize, positionLocal, positionViewDirection, positionWorld, pow, reflector, saturate, screenUV, sqrt, texture,
-  textureStore, transformNormalToView, uniformArray, uniform, vec2, vec3, vec4, viewportTexture,
+  Fn, If, Loop, attribute, cameraPosition, dot, exp, float, floor, fwidth, instanceIndex, instancedArray, int, ivec2,
+  mix, normalView, normalize, positionLocal, positionView, positionViewDirection, positionWorld, pow, reflector, saturate,
+  screenUV, select, sqrt, texture, textureLoad, textureStore, transformNormalToView, uniformArray, uniform, vec2, vec3,
+  vec4, viewportTexture,
 } from 'three/tsl'
 import {HollowField, createHollowRandom} from './HollowField.js'
 import {HollowLitMaterial} from './HollowMaterial.js'
 import type {HollowAtmosphere} from './HollowAtmosphere.js'
 
-/** Ripple grid resolution (cells per side) of the GPU wave solver. */
-export const WAVE_RES = 512
-/** Shore-mask resolution; upsampled to `WAVE_RES` (the mask needs ~65k field queries, not 262k). */
-const MASK_RES = 256
+/** Ripple grid resolution (cells per side) of the GPU wave solver: about 2 cm cells over the lake. */
+export const WAVE_RES = 1024
 const SUBSTEP = 1 / 120
 const MAX_SUBSTEPS = 8
 /** Impacts injected per substep (more in one substep wait for the next). */
 const MAX_IMPACTS = 4
 const GRAVITY = 9.81
-const DROPLET_COUNT = 28
+/** Drops in flight at once, at most. */
+const DROPLET_COUNT = 8
 /** Mean drops per second over the whole lake. */
-const DROP_RATE = 0.75
+const DROP_RATE = 0.19
 /** Phase speed (`m/s`) of the long ripples, and the capillary stiffness that makes short ones outrun them. */
 const WAVE_SPEED = 0.32
 const CAPILLARY = 0.0025
-const DAMPING = 0.9965
+/** Velocity kept per substep (`~0.89` a second): rings reach the shores and come back before they die out. */
+const DAMPING = 0.999
 const WATER_IOR = 1.333
 /** Absorption `σa` (`1/m`, red / green / blue) of clear mineral water: red dies within metres, blue carries. */
 const WATER_ABSORPTION = vec3(0.45, 0.07, 0.03)
 /** Scattering `σs` (`1/m`) of the fine suspended calcite. */
 const WATER_SCATTERING = 0.25
+/** How deep (`m`) the bed map sees under the water. */
+const BED_REACH = 8
+/** Water shallower than this (`m`) carries no ripples: the solver's shore. */
+const BED_MIN_DEPTH = 0.01
+/** Pixels over which the lake fades into the rock it meets. */
+const SHORE_PIXELS = 2
+/**
+ * Mirror depth × view depth (about the height, in metres, of the reflected point over the water) up to which the
+ * shore fade applies: above it a reflection's edge is another object's, not the shore's.
+ */
+const SHORE_REACH = 0.08
+/** The mirror's cleared depth: nothing reflected there. */
+const MIRROR_EMPTY = 0.99999
+const BILINEAR_TAPS = [[0, 0], [1, 0], [0, 1], [1, 1]] as const
+
+type RendererState = ReturnType<typeof RendererUtils.resetRendererState>
 
 /** Schlick Fresnel of the air–water interface at `cosTheta`. */
 function waterFresnel(cosTheta: Node<'float'>) {
@@ -56,6 +74,8 @@ export class HollowWaterMaterial extends HollowLitMaterial {
   beneathWeightNode: Node<'vec3'> = vec3(0)
   /** The opaque scene behind the surface (a viewport texture, already fogged). */
   beneathNode: Node<'vec3'> = vec3(0)
+  /** How much of the water shows (`1`), or only `beneathNode` (`0`): fades the water's edge into the rock. */
+  shoreNode: Node<'float'> = float(1)
   private readonly atmosphere: HollowAtmosphere
 
   constructor(atmosphere: HollowAtmosphere, params: ConstructorParameters<typeof HollowLitMaterial>[0]) {
@@ -70,7 +90,8 @@ export class HollowWaterMaterial extends HollowLitMaterial {
     const fog = this.atmosphere.fogAt(positionWorld)
     const surface = outputNode.rgb.mul(fog.a).add(fog.rgb)
     const behind = this.beneathWeightNode.mul(this.beneathNode.sub(fog.rgb).max(0))
-    return super.setupOutput(builder, vec4(surface.add(behind), outputNode.a))
+    const water = mix(this.beneathNode, surface.add(behind), this.shoreNode)
+    return super.setupOutput(builder, vec4(water, outputNode.a))
   }
 }
 
@@ -107,9 +128,10 @@ export function scheduleHollowDrops(field: HollowField, emitters: Vector3[], dur
 
 /**
  * Meandering mirror lake: planar `reflector` bent by the ripples over refracted, absorbing water, falling stalactite
- * droplets on a seeded loop-periodic schedule, and a `512²` GPU capillary-gravity wave solver
+ * droplets on a seeded loop-periodic schedule, and a `1024²` GPU capillary-gravity wave solver
  * (`ḧ = c²∇²h − β∇⁴h`, leapfrog, damped) whose Neumann boundary is the lake's shore, so rings rebound off the banks,
- * the rimstone dam and the boulders.
+ * the rimstone dam and the boulders. The shore and the water's depth come from the cave itself: its bed seen from the
+ * water's plane (`bed`), drawn once per cave.
  */
 export class HollowWater {
 
@@ -129,15 +151,27 @@ export class HollowWater {
   private readonly heightA = instancedArray(WAVE_RES * WAVE_RES, 'float')
   private readonly heightB = instancedArray(WAVE_RES * WAVE_RES, 'float')
   private readonly laplacian = instancedArray(WAVE_RES * WAVE_RES, 'float')
-  private readonly maskData = new Float32Array(WAVE_RES * WAVE_RES)
-  private readonly mask = instancedArray(this.maskData, 'float')
+  /** `1` over water, `0` over rock and on the grid's border (from `bed`). */
+  private readonly mask = instancedArray(WAVE_RES * WAVE_RES, 'float')
   private readonly heightTexture: StorageTexture
+  /**
+   * The cave under the water's plane, over the grid: the depth (`m`) of the first surface below the plane where it
+   * faces up (water over a bed) and its normal's `y`; `0, ≤ 0` where the plane is inside the rock.
+   */
+  private readonly bed: RenderTarget
+  private readonly bedScene = new Scene()
+  private readonly bedCamera = new OrthographicCamera()
+  private readonly bedMesh: Mesh<BufferGeometry, NodeMaterial>
+  private bedState: RendererState | undefined = undefined
+  private bedStale = false
+  private readonly waterLevel = uniform(0)
   private readonly impacts = uniformArray(Array.from({length: MAX_IMPACTS}, () => new Vector4()), 'vec4')
   /** World `xz` of the grid's corner and its side length (`m`). */
   private readonly waveOrigin = uniform(new Vector2(-10, -12))
   private readonly waveSize = uniform(16)
   private readonly kernels: {
     clear: ComputeNode
+    mask: ComputeNode
     inject: [ComputeNode, ComputeNode]
     laplace: [ComputeNode, ComputeNode]
     advance: [ComputeNode, ComputeNode]
@@ -159,7 +193,8 @@ export class HollowWater {
 
     // `bounces: false` — only the lake material may sample this RT. Any other material reading it during the
     // mirror pass hits WebGPU TextureBinding|RenderAttachment validation and drops the frame (black scene).
-    this.lakeReflector = reflector({resolutionScale: 0.75, bounces: false})
+    // Its depth marks what the mirror holds, and how far the reflected point is above the water (`shoreFade`)
+    this.lakeReflector = reflector({resolutionScale: 0.75, bounces: false, depth: true})
     this.lakeReflector.target.name = 'Lake Reflector'
     // ReflectorNode treats target local +Z as the mirror normal; lake mesh is Y-up (unrotated).
     this.lakeReflector.target.rotateX(-Math.PI / 2)
@@ -172,6 +207,15 @@ export class HollowWater {
     this.heightTexture.generateMipmaps = false
     this.heightTexture.name = 'Hollow Ripple Height'
 
+    this.bed = new RenderTarget(WAVE_RES, WAVE_RES, {
+      type: HalfFloatType, generateMipmaps: false, minFilter: LinearFilter, magFilter: LinearFilter,
+    })
+    this.bed.texture.name = 'Hollow Lake Bed'
+    this.bedMesh = new Mesh(new BufferGeometry(), this.createBedMaterial())
+    this.bedMesh.frustumCulled = false
+    this.bedMesh.matrixAutoUpdate = false
+    this.bedScene.add(this.bedMesh)
+
     this.kernels = this.createKernels()
     this.lakeMaterial = this.createLakeMaterial()
     this.rimstoneMaterial = this.createPoolMaterial()
@@ -179,8 +223,11 @@ export class HollowWater {
     this.dropletMesh = this.createDropletMesh()
   }
 
-  /** Re-seeds the drop schedule, rebuilds the shore mask over the lake's extent and stills the water. */
-  syncToField(dripEmitters: Vector3[], duration: number) {
+  /**
+   * Re-seeds the drop schedule, fits the grid to the lake's extent, redraws the bed of `cave` (the cave's surface) on
+   * the next step and stills the water.
+   */
+  syncToField(cave: BufferGeometry, dripEmitters: Vector3[], duration: number) {
     this.emitters = dripEmitters
     this.drops = scheduleHollowDrops(this.field, dripEmitters, duration)
     this.pendingImpacts = []
@@ -191,23 +238,10 @@ export class HollowWater {
     const cz = 0.5 * (extent.minZ + extent.maxZ)
     this.waveOrigin.value.set(cx - size * 0.5, cz - size * 0.5)
     this.waveSize.value = size
-
-    const coarse = new Uint8Array(MASK_RES * MASK_RES)
-    for (let y = 0; y < MASK_RES; y++) {
-      for (let x = 0; x < MASK_RES; x++) {
-        const wx = this.waveOrigin.value.x + (x + 0.5) / MASK_RES * size
-        const wz = this.waveOrigin.value.y + (y + 0.5) / MASK_RES * size
-        coarse[y * MASK_RES + x] = this.field.lakeDepthAt(wx, wz) > 0.02 ? 1 : 0
-      }
-    }
-    const up = WAVE_RES / MASK_RES
-    for (let y = 0; y < WAVE_RES; y++) {
-      for (let x = 0; x < WAVE_RES; x++) {
-        const edge = x === 0 || y === 0 || x === WAVE_RES - 1 || y === WAVE_RES - 1
-        this.maskData[y * WAVE_RES + x] = !edge && coarse[Math.floor(y / up) * MASK_RES + Math.floor(x / up)] ? 1 : 0
-      }
-    }
-    this.mask.value.needsUpdate = true
+    this.waterLevel.value = this.field.params.waterLevel
+    // (The mesh shares the cave's buffers, which the cave disposes)
+    this.bedMesh.geometry = cave
+    this.bedStale = true
     this.needsClear = true
 
     this.lakeReflector.target.position.set(this.field.spineX(this.field.lakeCenterZ), this.field.params.waterLevel, this.field.lakeCenterZ)
@@ -226,6 +260,15 @@ export class HollowWater {
       this.heightA.element(instanceIndex).assign(0)
       this.heightB.element(instanceIndex).assign(0)
       this.laplacian.element(instanceIndex).assign(0)
+    })().compute(N * N)
+
+    // The solver's shore: water over a bed at least `BED_MIN_DEPTH` deep, and never the grid's border
+    const mask = Fn(() => {
+      const {x, y} = cellXY()
+      const bed = textureLoad(this.bed.texture, ivec2(x, y))
+      const border = x.equal(0).or(y.equal(0)).or(x.equal(N - 1)).or(y.equal(N - 1))
+      const wet = bed.g.greaterThan(0).and(bed.r.greaterThan(BED_MIN_DEPTH)).and(border.not())
+      this.mask.element(instanceIndex).assign(select(wet, float(1), float(0)))
     })().compute(N * N)
 
     // Neumann 5-point Laplacian: a dry neighbor mirrors the center, so the shore reflects instead of absorbing
@@ -284,6 +327,7 @@ export class HollowWater {
 
     return {
       clear,
+      mask,
       inject: [inject(this.heightA), inject(this.heightB)] as [ComputeNode, ComputeNode],
       laplace: [laplace(this.heightA), laplace(this.heightB)] as [ComputeNode, ComputeNode],
       advance: [advance(this.heightA, this.heightB), advance(this.heightB, this.heightA)] as [ComputeNode, ComputeNode],
@@ -319,23 +363,96 @@ export class HollowWater {
     return scatter.mul(transmitted)
   }
 
+  /**
+   * Draws the cave's bed into `bed`, seen from the water's plane straight down over the grid (only what lies under the
+   * plane: its depth is the depth range), and the solver's shore from it.
+   */
+  private createBedMaterial() {
+    const material = new NodeMaterial()
+    material.name = 'Hollow Lake Bed'
+    // Both sides: under the rock the first surface below the plane faces down. (Not front side only: the meshlet
+    // pipeline leaves it to the regular one)
+    material.side = DoubleSide
+    const grid = positionWorld.xz.sub(this.waveOrigin).div(this.waveSize)
+    const below = this.waterLevel.sub(positionWorld.y)
+    material.vertexNode = vec4(grid.mul(2).sub(1).mul(vec2(1, -1)), below.div(BED_REACH), 1)
+    const up = attribute('normal', 'vec3').y
+    material.fragmentNode = vec4(select(up.greaterThan(0), below, float(0)), up, 0, 1)
+    return material
+  }
+
+  private drawBed(renderer: WebGPURenderer) {
+    const state = this.bedState = RendererUtils.resetRendererState(renderer, this.bedState as RendererState)
+    renderer.setClearColor(0x000000, 0)
+    renderer.setRenderTarget(this.bed)
+    renderer.clear()
+    renderer.render(this.bedScene, this.bedCamera)
+    RendererUtils.restoreRendererState(renderer, state)
+    void renderer.compute(this.kernels.mask)
+  }
+
+  /** Depth (`m`) of the water at the fragment, to the cave's surface under it (boulders and dripstones too). */
+  private bedDepth() {
+    return texture(this.bed.texture, positionWorld.xz.sub(this.waveOrigin).div(this.waveSize)).r
+  }
+
+  /**
+   * A bilinear fetch from the mirror at `uv`, over only the texels it reflected something into (its depth isn't
+   * cleared): `rgb` the mean of those, `a` their weight. At the shore the mirror holds nothing past the waterline (its
+   * clip plane removed the rock below the water, and the rock above is seen from inside, culled).
+   */
+  private mirrorTaps(uv: Node<'vec2'>, sample: (texel: Node<'ivec2'>, depth: Node<'float'>) => Node<'vec3'>) {
+    const depthMap = this.lakeReflector.getDepthNode()
+    const size = vec2(depthMap.size(int(0)) as Node<'ivec2'>)
+    const p = uv.mul(size).sub(0.5)
+    const base = floor(p)
+    const f = p.sub(base)
+    let sum: Node<'vec3'> = vec3(0)
+    let weight: Node<'float'> = float(0)
+    for (const [ox, oy] of BILINEAR_TAPS) {
+      const texel = ivec2(base.add(vec2(ox, oy)).clamp(vec2(0), size.sub(1)))
+      const depth = depthMap.load(texel).x
+      const w = (ox ? f.x : f.x.oneMinus()).mul(oy ? f.y : f.y.oneMinus())
+      const covered = select(depth.lessThan(MIRROR_EMPTY), w, float(0))
+      sum = sum.add(sample(texel, depth).mul(covered))
+      weight = weight.add(covered)
+    }
+    return vec4(sum.div(weight.max(1e-4)), weight)
+  }
+
+  /**
+   * How much of the water shows, from `0` where it meets the rock to `1` over `SHORE_PIXELS`: the mirror's depth
+   * there grows from `0` with the height above the water of the point it reflects (`depth ∝ height / distance` under its
+   * oblique clip plane), and at the waterline that point is the waterline. The ratio to its screen gradient is pixels.
+   */
+  private shoreFade() {
+    const height = this.mirrorTaps(screenUV.flipX(), (_texel, depth) => vec3(depth)).x.mul(positionView.z.negate())
+    const fade = saturate(height.div(fwidth(height).mul(SHORE_PIXELS).max(1e-6)))
+    return select(height.greaterThan(SHORE_REACH), float(1), fade)
+  }
+
   private createLakeMaterial() {
     const material = new HollowWaterMaterial(this.atmosphere, {roughness: 0.025, metalness: 0.0, ior: WATER_IOR})
     material.name = 'Hollow Lake'
 
     const waveN = this.rippleNormal()
     material.normalNode = transformNormalToView(waveN)
-    this.lakeReflector.uvNode = this.lakeReflector.uvNode!.add(waveN.xz.mul(0.35))
+    const shore = this.shoreFade()
+    material.shoreNode = shore
 
     const viewDir = normalize(cameraPosition.sub(positionWorld))
     const cosView = saturate(dot(waveN, viewDir))
     const fresnel = waterFresnel(cosView)
-    const depth = attribute('aWaterDepth', 'float').max(0.0)
+    const depth = this.bedDepth()
     const scatter = this.waterColumn(material, depth, cosView, fresnel)
-    // Screen-space refraction: the bed shifts with the ripple slope, more through deeper water
-    material.beneathNode = this.backdrop.sample(screenUV.add(waveN.xz.mul(depth.min(0.8).mul(0.06)))).rgb
+    // Screen-space refraction: the bed shifts with the ripple slope, more through deeper water, none at the waterline
+    material.beneathNode = this.backdrop.sample(screenUV.add(waveN.xz.mul(depth.min(0.8).mul(0.06)).mul(shore))).rgb
+    // The mirror image bent by the ripples. Where the bend reaches past the waterline the mirror holds nothing: the
+    // rock there, through the water, stands in for it
+    const mirror = this.mirrorTaps(screenUV.flipX().add(waveN.xz.mul(0.35)), texel => this.lakeReflector.load(texel).rgb)
+    const reflected = mix(material.beneathNode, mirror.rgb, saturate(mirror.a.mul(4)))
     // The mirror image is light leaving the surface, not albedo: emit it, weighted by Fresnel
-    material.emissiveNode = this.lakeReflector.rgb.mul(fresnel).add(scatter)
+    material.emissiveNode = reflected.mul(fresnel).add(scatter)
     return material
   }
 
@@ -395,7 +512,7 @@ export class HollowWater {
       const vy = drop.speed + GRAVITY * age
       const y = tip.y - 0.02 - drop.speed * age - 0.5 * GRAVITY * age * age
       if (y <= wl) continue
-      const s = 0.016 + Math.min(0.035, vy * 0.0035)
+      const s = 0.004 + Math.min(0.009, vy * 0.0009)
       this._p.set(tip.x, y, tip.z)
       this.dropletMesh.setMatrixAt(live, this._m.makeScale(s, s * 1.35, s).setPosition(this._p))
       live++
@@ -406,12 +523,16 @@ export class HollowWater {
 
   private queueImpact(tip: Vector3, strength: number) {
     if (this.field.lakeDepthAt(tip.x, tip.z) < 0.03) return
-    // Crater depth (`m`) and radius (`m`)
-    this.pendingImpacts.push(new Vector4(tip.x, tip.z, 0.006 * strength, 0.035 + 0.02 * strength))
+    // Crater depth (`m`) and radius (`m`): a drop a few millimetres across, a ring or two of grid cells
+    this.pendingImpacts.push(new Vector4(tip.x, tip.z, 0.006 * strength, 0.025 + 0.015 * strength))
   }
 
   /** Steps the solver by `delta` seconds of played timeline in fixed substeps, injecting queued impacts. */
   step(renderer: WebGPURenderer, delta: number) {
+    if (this.bedStale) {
+      this.bedStale = false
+      this.drawBed(renderer)
+    }
     if (this.needsClear) {
       void renderer.compute(this.kernels.clear)
       this.phase = 0
@@ -439,6 +560,8 @@ export class HollowWater {
     this.dropletMesh.geometry.dispose()
     this.dropletMaterial.dispose()
     this.heightTexture.dispose()
+    this.bed.dispose()
+    this.bedMesh.material.dispose()
     for (const node of [this.heightA, this.heightB, this.laplacian, this.mask]) node.value.dispose?.()
   }
 }

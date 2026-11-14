@@ -252,7 +252,7 @@ describe('Hollow — karst SDF, sculpted cave & speleothems', () => {
     const duration = 90
     const drops = scheduleHollowDrops(field, speleothems.dripEmitters, duration)
     expect(drops).toEqual(scheduleHollowDrops(field, speleothems.dripEmitters, duration))
-    expect(drops.length).toBeGreaterThan(30)
+    expect(drops.length).toBeGreaterThan(12)
     for (const drop of drops) {
       expect(drop.spawn).toBeGreaterThanOrEqual(0)
       expect(drop.spawn).toBeLessThan(duration)

@@ -515,7 +515,7 @@ export class Hollow extends Document implements CaptureDefaults {
     this.rimstonePoolMesh.geometry = nextRimGeo
     this.rimstonePoolMesh.visible = this.rimstoneScale > 0.05
 
-    this.water.syncToField(this.dripEmitters, this.timeline.duration)
+    this.water.syncToField(this.caveSurface.geometry, this.dripEmitters, this.timeline.duration)
     this.hollowLighting.syncToField()
     this.atmosphere.syncToField(this.field)
 

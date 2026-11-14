@@ -411,7 +411,8 @@ export class IoCodevember extends ReactiveElement {
 
   /**
    * Page-wide keys, whatever has focus (a window listener): Escape leaves fullscreen; Space plays or pauses, unless a
-   * field or button has it (it presses that) or the timeline's scrub bar does (it toggles playback itself), or text is edited.
+   * field or button has it (it presses that) or the timeline's scrub bar does (it toggles playback itself), or text is
+   * edited; on Hollow, `g` draws a new seed.
    */
   onKeyDown(event: KeyboardEvent) {
     if (event.defaultPrevented || this.loading) return
@@ -424,6 +425,15 @@ export class IoCodevember extends ReactiveElement {
     } else if (event.code === 'Space' && !event.repeat && !handlesSpace(event)) {
       event.preventDefault()
       this.editor.isPlaying = !this.editor.isPlaying
+    } else if (
+      event.key === 'g' && !event.repeat && !event.metaKey && !event.ctrlKey && !event.altKey
+      && !handlesSpace(event) && this.documentName === 'Hollow'
+    ) {
+      const document = this.editor.document as Document & {randomizeSeed?: () => void}
+      if (document.randomizeSeed) {
+        event.preventDefault()
+        document.randomizeSeed()
+      }
     }
   }
 

@@ -390,3 +390,13 @@ Complete log. Entries before 2026-11-12 11:00 were written in the io repo (packa
 - Done: HollowChunks (charts, packing, kd chunks, skirts), HollowSurfaceBaker (MRT bake, dilation), baked material, surfaceMode, meshlet pipeline. Fixed: MRT alpha coverage, NaN bump on slivers. Meshlet LOD disabled (seam collapse).
 - Seed 1056 headless: baked+meshlets 60 fps cap (procedural standard ~28); 481k/2.33M tris drawn.
 - Checks: typecheck, lint, 60 tests, build.
+
+## 2026-11-14 [hollow][ux] g key new seed
+- Wired `g` in IoCodevember.onKeyDown when documentName===Hollow → randomizeSeed (skip when typing / modifiers / repeat). Keymap hint updated.
+
+## 2026-11-14 [hollow][water] water pass
+- User: drops 1/4 as often and 1/4 size, sharper rings (bigger sim ok), fix dark/jagged lake edge + blend a couple px, bounce off edges if cheap.
+- Dark edge = mirror RT empty past the waterline (clip plane cuts rock below water, rock above seen from inside = culled) -> background black; ripple bend + 0.75 res bilinear pulled it in (red-background test). Fix: reflector depth:true, normalized bilinear over covered texels, fallback backdrop.
+- Shore fade: mirror depth under oblique clip = s·h/dist (s≈1.0 measured) -> h·dist ≈ height of reflected point; ratio to fwidth = px from waterline; guard h>0.08 m (reflection edges). Jagged edge was no AA (camera view forward, msaa off) + that line.
+- Bed map: cave surface drawn top-down from the water plane (DoubleSide, so not meshlet), r = depth where normal faces up; mask kernel from it (boulders now reflect rings) and lake depth (aWaterDepth dropped from the lake). CPU 256² mask gone.
+- WAVE_RES 1024, DAMPING 0.999, crater r 2.5-4 cm, DROP_RATE 0.19, DROPLET_COUNT 8. Checks: typecheck, lint, 60 tests, build.
