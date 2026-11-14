@@ -7,6 +7,7 @@ import { buildHollowSpeleothems } from './HollowSpeleothems.js'
 import { FLOW_LOBE, HollowSculpt } from './HollowSculpt.js'
 import { HollowSculptPool } from './HollowSculptPool.js'
 import { scheduleHollowDrops } from './HollowWater.js'
+import { CHUNK_TRIANGLES, SKIRT_DEPTH, buildHollowChunks } from './HollowChunks.js'
 
 const SEEDS = [1056, 7, 41, 908, 1337, 42, 777, 2501]
 
@@ -378,6 +379,32 @@ describe('Hollow — karst SDF, sculpted cave & speleothems', () => {
       if (face.dot(n) < 0 && face.length() > 2e-4) flipped++
     }
     expect(flipped).toBeLessThan(idx.count / 3 / 5000)
+
+    // Drawn in chunks over a 4096² atlas: every face of the surface in one chunk, each vertex on the surface (or its
+    // chunk's skirt, a few centimetres behind it) and keeping its surface vertex's light map texel
+    const chunks = buildHollowChunks(cave)
+    expect(chunks.scale).toBeGreaterThan(30)
+    let chunkTriangles = 0
+    for (const chunk of chunks.render) {
+      const cp = chunk.getAttribute('position') as BufferAttribute
+      const cuv = chunk.getAttribute('uv') as BufferAttribute
+      const texel = chunk.getAttribute('aLightTexel') as BufferAttribute
+      chunkTriangles += chunk.getIndex()!.count / 3
+      expect(chunk.groups[0].materialIndex).toBe(0)
+      for (let v = 0; v < cp.count; v += 17) {
+        expect(cuv.getX(v)).toBeGreaterThan(0)
+        expect(cuv.getX(v)).toBeLessThan(1)
+        expect(cuv.getY(v)).toBeGreaterThan(0)
+        expect(cuv.getY(v)).toBeLessThan(1)
+        const t = texel.getX(v)
+        expect(Number.isInteger(t) && t < pos.count).toBe(true)
+        const gap = p0.fromBufferAttribute(cp, v).distanceTo(p1.fromBufferAttribute(pos, t))
+        expect(Math.min(gap, Math.abs(gap - SKIRT_DEPTH))).toBeLessThan(1e-4)
+      }
+    }
+    expect(chunks.render.length).toBeGreaterThan(idx.count / 3 / CHUNK_TRIANGLES)
+    expect(chunkTriangles).toBeGreaterThan(idx.count / 3)
+    expect(chunkTriangles).toBeLessThan(idx.count / 3 * 1.1)
 
     cave.dispose()
   })

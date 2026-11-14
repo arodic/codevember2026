@@ -1,8 +1,8 @@
-import {MeshPhysicalNodeMaterial, Node, UniformNode} from 'three/webgpu'
+import {DoubleSide, MeshPhysicalNodeMaterial, Node, NodeMaterial, Texture, UniformNode} from 'three/webgpu'
 import {
-  Fn, If, abs, attribute, cross, dot, float, floor, fwidth, hash, length, luminance, max, min, mix, mx_noise_float,
+  Fn, If, abs, attribute, cross, dot, float, floor, fwidth, hash, length, luminance, max, min, mix, mrt, mx_noise_float,
   mx_worley_noise_vec2, normalize, normalWorldGeometry, positionWorld, saturate, select, sign, sin,
-  smoothstep, sqrt, transformNormalToView, uniform, varying, vec3, vec4,
+  smoothstep, sqrt, texture, transformNormalToView, uniform, uv, varying, vec2, vec3, vec4,
 } from 'three/tsl'
 
 type FloatNode = Node<'float'>
@@ -145,7 +145,25 @@ function bumpNormal(n: Vec3Node, height: FloatNode): Vec3Node {
   const r2 = cross(n, dpdx)
   const det = dot(dpdx, r1)
   const grad = r1.mul(height.dFdx()).add(r2.mul(height.dFdy())).mul(sign(det))
-  return normalize(abs(det).mul(n).sub(grad))
+  const bumped = abs(det).mul(n).sub(grad)
+  // Where the fragments have no extent (a sliver of a chart baked edge-on, a point) there's no slope to bump: `n`
+  return select(dot(bumped, bumped).greaterThan(1e-24), normalize(bumped), n)
+}
+
+/** The surface's values at a fragment (world space): `hollowSurfaceNodes` computes them, baked maps store them. */
+export interface HollowSurfaceNodes {
+  /** Albedo (linear): as shaded, or the layers in false colour (`controls.debug`). */
+  color: Vec3Node
+  roughness: FloatNode
+  /** Specular intensity: the reflectivity (scales calcite's `F0 ≈ 0.047`). */
+  specular: FloatNode
+  metalness: FloatNode
+  /** The bumped shading normal and the geometric one (world space). */
+  normal: Vec3Node
+  geometryNormal: Vec3Node
+  /** Water film (the clearcoat), and how much of it lies level (a puddle). */
+  water: FloatNode
+  puddle: FloatNode
 }
 
 /**
@@ -161,17 +179,10 @@ function bumpNormal(n: Vec3Node, height: FloatNode): Vec3Node {
  * Water films are a clearcoat over the darkened, smoother solid: the wet patches the field marks, rivulets down steep
  * faces, strips down dripstones and flowstone, and puddles whose coat lies level. The relief the mesh lacks (it's `5`
  * to `20 cm` cells in the cave) is bump mapped from the same noises that colour it, so cracks and pits are dark and
- * sunken alike.
+ * sunken alike. Its noises fade where the fragments' footprint (`fwidth`, a pixel, or a texel when baked) can't
+ * resolve them.
  */
-export function applyHollowSurface(
-  material: MeshPhysicalNodeMaterial,
-  controls: HollowSurfaceControls,
-  options: HollowSurfaceOptions = {},
-) {
-  material.color.setRGB(...HOLLOW_SURFACE_MEAN_ALBEDO)
-  material.metalness = 0
-  material.ior = CALCITE_IOR
-
+export function hollowSurfaceNodes(controls: HollowSurfaceControls): HollowSurfaceNodes {
   const p = positionWorld
   const n = normalize(normalWorldGeometry)
   const zone = attribute('aZone', 'vec4')
@@ -332,8 +343,6 @@ export function applyHollowSurface(
   height = mix(height, float(0), puddle)
 
   const shading = bumpNormal(n, height.mul(controls.relief))
-  // A water film follows the rock's shape but not its grain; a puddle's lies level
-  const coatNormal = normalize(mix(normalize(mix(shading, n, 0.6)), vec3(0, 1, 0), puddle))
 
   const shaded = controls.debug.lessThan(0.5)
   const layers = mix(
@@ -345,14 +354,97 @@ export function applyHollowSurface(
     vec3(0.35, 0.2, 0.08),
     sediment,
   )
-  material.colorNode = select(shaded, albedo, mix(layers, vec3(0.1, 0.35, 1), water.mul(0.6)))
-  material.roughnessNode = saturate(rough)
-  material.specularIntensityNode = specular
-  material.normalNode = transformNormalToView(shading)
-  material.clearcoatNode = select(shaded, water, float(0))
+  return {
+    color: select(shaded, albedo, mix(layers, vec3(0.1, 0.35, 1), water.mul(0.6))),
+    roughness: saturate(rough),
+    specular,
+    metalness: float(0),
+    normal: shading,
+    geometryNormal: n,
+    water: select(shaded, water, float(0)),
+    puddle,
+  }
+}
+
+/** The surface's values (`hollowSurfaceNodes`) on a lit material: a water film follows the rock but not its grain. */
+function applySurfaceNodes(material: MeshPhysicalNodeMaterial, surface: HollowSurfaceNodes, options: HollowSurfaceOptions) {
+  material.color.setRGB(...HOLLOW_SURFACE_MEAN_ALBEDO)
+  material.metalness = 0
+  material.ior = CALCITE_IOR
+  const {normal, geometryNormal, puddle} = surface
+  // A puddle's coat lies level
+  const coatNormal = normalize(mix(normalize(mix(normal, geometryNormal, 0.6)), vec3(0, 1, 0), puddle))
+  material.colorNode = surface.color
+  material.roughnessNode = surface.roughness
+  material.specularIntensityNode = surface.specular
+  material.metalnessNode = surface.metalness
+  material.normalNode = transformNormalToView(normal)
+  material.clearcoatNode = surface.water
   material.clearcoatRoughnessNode = mix(float(0.08), float(0.025), puddle)
   material.clearcoatNormalNode = transformNormalToView(coatNormal)
-  material.aoNode = occ
-  if (options.transmission) material.emissiveNode = options.transmission(shading)
+  material.aoNode = attribute('aOcclusion', 'float')
+  if (options.transmission) material.emissiveNode = options.transmission(normal)
   material.needsUpdate = true
+}
+
+/** The surface computed per fragment (`hollowSurfaceNodes`): every noise, live. */
+export function applyHollowSurface(
+  material: MeshPhysicalNodeMaterial,
+  controls: HollowSurfaceControls,
+  options: HollowSurfaceOptions = {},
+) {
+  applySurfaceNodes(material, hollowSurfaceNodes(controls), options)
+}
+
+/**
+ * The surface baked into textures over the geometry's `uv` (`createHollowSurfaceBake`): `albedo` (`rgb` its square
+ * root, `a` the water film), `surface` (reflectivity, roughness, metalness, puddle) and `normal` (the world shading
+ * normal, `* 0.5 + 0.5`).
+ */
+export interface HollowSurfaceMaps {
+  albedo: Texture
+  surface: Texture
+  normal: Texture
+}
+
+/** The surface read from its baked maps: three texture fetches instead of the noises. */
+export function applyBakedHollowSurface(
+  material: MeshPhysicalNodeMaterial,
+  maps: HollowSurfaceMaps,
+  options: HollowSurfaceOptions = {},
+) {
+  const coord = uv()
+  const albedo = texture(maps.albedo, coord)
+  const surface = texture(maps.surface, coord)
+  const normal = texture(maps.normal, coord).xyz.mul(2).sub(1)
+  applySurfaceNodes(material, {
+    color: albedo.rgb.mul(albedo.rgb),
+    roughness: surface.g,
+    specular: surface.r,
+    metalness: surface.b,
+    normal: normalize(normal),
+    geometryNormal: normalize(normalWorldGeometry),
+    water: albedo.a,
+    puddle: surface.a,
+  }, options)
+}
+
+/**
+ * Bakes the surface (`hollowSurfaceNodes`) into its maps: draws the geometry at its `uv` (both sides: the charts face
+ * either way) into a render target of three textures named as `HollowSurfaceMaps` (an empty texel's normal is black).
+ */
+export function createHollowSurfaceBake(controls: HollowSurfaceControls): NodeMaterial {
+  const surface = hollowSurfaceNodes(controls)
+  const material = new NodeMaterial()
+  material.name = 'Hollow Surface Bake'
+  material.side = DoubleSide
+  material.depthTest = false
+  material.depthWrite = false
+  material.vertexNode = vec4(uv().mul(2).sub(1).mul(vec2(1, -1)), 0, 1)
+  material.mrtNode = mrt({
+    albedo: vec4(sqrt(max(surface.color, vec3(0))), surface.water),
+    surface: vec4(surface.specular, surface.roughness, surface.metalness, surface.puddle),
+    normal: vec4(surface.normal.mul(0.5).add(0.5), 1),
+  })
+  return material
 }

@@ -384,3 +384,9 @@ Complete log. Entries before 2026-11-12 11:00 were written in the io repo (packa
 - User: some stalactites super long and thin -> carrots. Dropped `stem` (carrot + straw tail), straws ≤ 30 cm, carrot = cone (1−t)^0.8 with root flare, thicker base. Test: past 35 cm still > 2.5 cm radius halfway.
 - User: camera start good; end at 5× dolly, 3× truck, 5× pan. Offsets now track·(REACH·u − 0.5). Seed 1056 path checked at 4/25/45/65/86 s: clear.
 - Checks: typecheck, lint, 60 tests, build.
+
+## 2026-11-14 [hollow] Low-end: meshlets + baked surface atlas
+- User: meshlet rendering (+LOD if supported), bake material to 4K albedo + reflectivity/roughness/metalness, reuse light-map UVs. Light maps are per-vertex texels (no UVs) -> user chose a generated atlas.
+- Done: HollowChunks (charts, packing, kd chunks, skirts), HollowSurfaceBaker (MRT bake, dilation), baked material, surfaceMode, meshlet pipeline. Fixed: MRT alpha coverage, NaN bump on slivers. Meshlet LOD disabled (seam collapse).
+- Seed 1056 headless: baked+meshlets 60 fps cap (procedural standard ~28); 481k/2.33M tris drawn.
+- Checks: typecheck, lint, 60 tests, build.

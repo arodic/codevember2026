@@ -8,7 +8,9 @@ import {
 } from 'three/tsl'
 import type {HollowEnvProbe, HollowLightUniforms} from './HollowLighting.js'
 import type {HollowAtmosphere} from './HollowAtmosphere.js'
-import {type HollowSurfaceControls, applyHollowSurface} from './HollowSurface.js'
+import {
+  type HollowSurfaceControls, type HollowSurfaceMaps, applyBakedHollowSurface, applyHollowSurface,
+} from './HollowSurface.js'
 
 /** One baked PMREM specular probe. */
 export interface HollowEnvMap {
@@ -96,8 +98,8 @@ export interface HollowRockMaterialOptions {
   name: string
   /** Indirect irradiance per vertex (`HollowLighting.lightMapNode`). */
   lightMapNode: Node<'vec3'>
-  /** The surface's dials (`createHollowSurfaceControls`), shared by the rock and the calcite. */
-  surface: HollowSurfaceControls
+  /** The surface: live from its dials (`createHollowSurfaceControls`), or read from its baked maps. */
+  surface: HollowSurfaceControls | HollowSurfaceMaps
   /** Transmits the light reaching the far side of thin calcite sheets (`aSheet`): the draperies. */
   translucency?: HollowTranslucency
 }
@@ -158,8 +160,8 @@ export function createHollowRockMaterial(opts: HollowRockMaterialOptions): Hollo
   const material = new HollowLitMaterial({side: FrontSide})
   material.name = name
   material.lightMapNode = lightMapNode
-  applyHollowSurface(material, surface, {
-    transmission: translucency ? normal => calciteTransmission(normal, translucency) : undefined,
-  })
+  const options = {transmission: translucency ? (normal: Node<'vec3'>) => calciteTransmission(normal, translucency) : undefined}
+  if ('albedo' in surface) applyBakedHollowSurface(material, surface, options)
+  else applyHollowSurface(material, surface, options)
   return material
 }

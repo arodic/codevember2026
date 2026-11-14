@@ -8,6 +8,7 @@ import {Bloom, Document, DocumentProps, FrameTarget, Timeline} from '@io-gui/thr
 import {registerEditor} from '@io-gui/editors'
 import {ioNumberSlider} from '@io-gui/sliders'
 import {ioOptionSelect, Menu} from '@io-gui/menus'
+import type {MeshletDrawingPipeline} from 'three/addons/pipelines/MeshletDrawingPipeline.js'
 import type {CaptureDefaults, CaptureOptions} from '../Capture.js'
 import {TimelineFade} from '../TimelineFade.js'
 import {DEFAULT_HOLLOW_PARAMS, HollowField, createHollowRandom} from './hollow/HollowField.js'
@@ -23,6 +24,8 @@ import {HollowWater, HollowWaterMaterial} from './hollow/HollowWater.js'
 import {HollowAtmosphere} from './hollow/HollowAtmosphere.js'
 import {HollowLitMaterial, createHollowRockMaterial} from './hollow/HollowMaterial.js'
 import {type HollowSurfaceControls, createHollowSurfaceControls} from './hollow/HollowSurface.js'
+import {HollowSurfaceBaker} from './hollow/HollowSurfaceBaker.js'
+import {buildHollowChunks} from './hollow/HollowChunks.js'
 
 const DURATION = 90
 const FADE_SECONDS = 2.5
@@ -33,6 +36,8 @@ const FADE_SECONDS = 2.5
 const DOLLY_REACH = 5
 const TRUCK_REACH = 3
 const PAN_REACH = 5
+/** Projected error (pixels) under which the meshlet pipeline would draw a simpler level: none (see `onBeforeDraw`). */
+const MESHLET_LOD_THRESHOLD = 0
 /** Cluster size (`m`) of the cave's stand-in for the GI voxelizer: under its sub-voxels (`~11 cm`). */
 const GI_PROXY_CELL = 0.06
 
@@ -42,6 +47,13 @@ export type HollowCameraMode = typeof HOLLOW_CAMERA_MODES[number]
 /** The surface shaded, or its layers in false colour (`HollowSurface`). */
 export const HOLLOW_DISPLAYS = ['Shaded', 'Layers'] as const
 export type HollowDisplay = typeof HOLLOW_DISPLAYS[number]
+
+/**
+ * The surface baked into its maps over the atlas (three texture fetches a fragment, rebaked when a dial moves), or
+ * computed per fragment (every noise, live: for capable GPUs).
+ */
+export const HOLLOW_SURFACE_MODES = ['Baked', 'Procedural'] as const
+export type HollowSurfaceMode = typeof HOLLOW_SURFACE_MODES[number]
 
 const CUTAWAY_POSE = {
   position: new Vector3(16.5, 13.2, 13.5),
@@ -64,6 +76,9 @@ export class Hollow extends Document implements CaptureDefaults {
 
   @Property({type: String, value: 'Shaded'})
   declare display: HollowDisplay
+
+  @Property({type: String, value: 'Baked'})
+  declare surfaceMode: HollowSurfaceMode
 
   @Property({type: Number, value: DEFAULT_HOLLOW_PARAMS.seed})
   declare seed: number
@@ -173,8 +188,15 @@ export class Hollow extends Document implements CaptureDefaults {
   declare private caveGroup: Group
   /** The light-mapped meshes (a light map texel per vertex). */
   declare private litGroup: Group
-  /** The cave with its boulders, dripstones and draperies: one surface (`HollowSculpt`), rock and calcite groups. */
-  declare private caveMesh: Mesh<BufferGeometry, HollowLitMaterial[]>
+  /**
+   * The cave with its boulders, dripstones and draperies, one surface (`HollowSculpt`): as the light maps see it (a
+   * texel per vertex; not drawn), and as it draws, in chunks over the atlas (`buildHollowChunks`, rock and calcite
+   * groups), each culled and simplified apart by the meshlet pipeline.
+   */
+  declare private caveSurface: Mesh<BufferGeometry>
+  declare private caveChunks: Group
+  /** The chunks with the zones the surface reads per vertex (`HollowChunks.bake`). */
+  declare private caveZones: BufferGeometry[]
   /** The cave as the GI voxelizer sees it: coarser (`clusterSurface`), in its layer only. */
   declare private giMesh: Mesh<BufferGeometry, HollowLitMaterial>
   declare private sculptPool: HollowSculptPool
@@ -183,8 +205,13 @@ export class Hollow extends Document implements CaptureDefaults {
   /** The rock; the translucent calcite of the drapery sheets. */
   declare private rockMaterial: HollowLitMaterial
   declare private calciteMaterial: HollowLitMaterial
+  /** The rock and the calcite of each surface mode. */
+  declare private surfaceMaterials: Record<HollowSurfaceMode, HollowLitMaterial[]>
   /** The surface's dials, shared by the rock and the calcite. */
   declare private surface: HollowSurfaceControls
+  declare private surfaceBaker: HollowSurfaceBaker
+  /** The baked maps lag the chunks or the dials: rebake on the next draw. */
+  declare private surfaceStale: boolean
   declare private waterLevelUniform: UniformNode<'float', number>
   declare private dripEmitters: Vector3[]
   declare private caveDirty: boolean
@@ -200,6 +227,7 @@ export class Hollow extends Document implements CaptureDefaults {
     super({
       toneMapping: ACESFilmicToneMapping,
       toneMappingExposure: 0.8,
+      drawingPipeline: 'meshlet',
       timeline: new Timeline({autoplay: true, duration: DURATION, loop: true}),
       effects: [
         new Bloom({strength: 0.18, radius: 0.45, threshold: 1.1}),
@@ -217,6 +245,8 @@ export class Hollow extends Document implements CaptureDefaults {
 
     this.field = new HollowField()
     this.surface = createHollowSurfaceControls()
+    this.surfaceBaker = new HollowSurfaceBaker(this.surface)
+    this.surfaceStale = false
     this.applySurface()
     this.waterLevelUniform = uniform(this.waterLevel)
     this.dripEmitters = []
@@ -233,13 +263,18 @@ export class Hollow extends Document implements CaptureDefaults {
     this.water = new HollowWater(this.field, this.atmosphere)
     this.scene.add(this.water.dropletMesh)
 
-    const rock = {surface: this.surface, lightMapNode: this.hollowLighting.lightMapNode}
-    this.rockMaterial = createHollowRockMaterial({...rock, name: 'Hollow Karst Rock'})
-    this.calciteMaterial = createHollowRockMaterial({
-      ...rock,
-      name: 'Hollow Calcite',
-      translucency: {atmosphere: this.atmosphere, lights: lightUniforms},
-    })
+    const translucency = {atmosphere: this.atmosphere, lights: lightUniforms}
+    const pair = (mode: HollowSurfaceMode) => {
+      const surface = mode === 'Baked' ? this.surfaceBaker.maps : this.surface
+      const lit = {surface, lightMapNode: this.hollowLighting.lightMapNode}
+      const materials: HollowLitMaterial[] = []
+      materials[SCULPT_ROCK_GROUP] = createHollowRockMaterial({...lit, name: `Hollow Karst Rock (${mode})`})
+      materials[SCULPT_CALCITE_GROUP] = createHollowRockMaterial({...lit, name: `Hollow Calcite (${mode})`, translucency})
+      return materials
+    }
+    this.surfaceMaterials = {Baked: pair('Baked'), Procedural: pair('Procedural')}
+    this.rockMaterial = this.surfaceMaterials[this.surfaceMode][SCULPT_ROCK_GROUP]
+    this.calciteMaterial = this.surfaceMaterials[this.surfaceMode][SCULPT_CALCITE_GROUP]
 
     this.caveGroup = new Group()
     this.caveGroup.name = 'Hollow Cavern'
@@ -247,17 +282,15 @@ export class Hollow extends Document implements CaptureDefaults {
     this.litGroup = new Group()
     this.litGroup.name = 'Light-Mapped Rock'
 
-    const materials: HollowLitMaterial[] = []
-    materials[SCULPT_ROCK_GROUP] = this.rockMaterial
-    materials[SCULPT_CALCITE_GROUP] = this.calciteMaterial
-    this.caveMesh = new Mesh(new BufferGeometry(), materials)
-    this.caveMesh.name = 'Cavern'
-    this.caveMesh.castShadow = true
-    this.caveMesh.receiveShadow = true
+    this.caveZones = []
+    this.caveSurface = new Mesh(new BufferGeometry())
+    this.caveSurface.name = 'Cavern Surface'
+    this.caveChunks = new Group()
+    this.caveChunks.name = 'Cavern'
     this.giMesh = new Mesh(new BufferGeometry(), this.rockMaterial)
     this.giMesh.name = 'Cavern GI Proxy'
     this.giMesh.layers.set(HOLLOW_GI_LAYER)
-    this.litGroup.add(this.caveMesh, this.giMesh)
+    this.litGroup.add(this.caveChunks, this.giMesh)
     this.sculptPool = new HollowSculptPool()
 
     this.lakeMesh = new Mesh(new BufferGeometry(), this.water.lakeMaterial)
@@ -320,9 +353,10 @@ export class Hollow extends Document implements CaptureDefaults {
   flowstoneDensityChanged() { this.markCaveDirty() }
   boulderCountChanged() { this.markCaveDirty() }
 
-  /** The surface's dials from the inspector (uniforms: nothing recompiles). */
+  /** The surface's dials from the inspector (uniforms: nothing recompiles; the baked maps rebake). */
   private applySurface() {
     if (!this.surface) return
+    this.surfaceStale = true
     this.surface.debug.value = this.display === 'Layers' ? 1 : 0
     this.surface.wetness.value = this.wetness
     this.surface.iron.value = this.iron
@@ -333,6 +367,19 @@ export class Hollow extends Document implements CaptureDefaults {
   }
 
   displayChanged() { this.applySurface() }
+
+  surfaceModeChanged() {
+    if (!this.surfaceMaterials) return
+    const materials = this.surfaceMaterials[this.surfaceMode]
+    this.rockMaterial = materials[SCULPT_ROCK_GROUP]
+    this.calciteMaterial = materials[SCULPT_CALCITE_GROUP]
+    for (const chunk of this.caveChunks.children as Mesh[]) chunk.material = materials
+    this.attachZones()
+    this.giMesh.material = this.rockMaterial
+    this.envVersion = -1
+    this.surfaceStale = true
+    this.notify({kind: 'material'})
+  }
   wetnessChanged() { this.applySurface() }
   ironChanged() { this.applySurface() }
   sedimentChanged() { this.applySurface() }
@@ -419,13 +466,42 @@ export class Hollow extends Document implements CaptureDefaults {
       this.sculpting = false
       this.field.configure(params)
       this.dripEmitters = speleothems.dripEmitters
-      this.caveMesh.geometry.dispose()
-      this.caveMesh.geometry = cave
+      this.caveSurface.geometry.dispose()
+      this.caveSurface.geometry = cave
+      this.setChunks(cave)
       this.giMesh.geometry.dispose()
       this.giMesh.geometry = clusterSurface(cave, GI_PROXY_CELL)
-      this.hollowLighting.setLightMapped([this.caveMesh])
+      this.hollowLighting.setLightMapped([this.caveSurface])
       this.applyField()
     }, (error) => console.error(error))
+  }
+
+  /** The cave's chunks for `cave` (replacing the last), and the surface to bake over them. */
+  private setChunks(cave: BufferGeometry) {
+    for (const chunk of this.caveChunks.children as Mesh[]) chunk.geometry.dispose()
+    this.caveChunks.clear()
+    const chunks = buildHollowChunks(cave)
+    const materials = this.surfaceMaterials[this.surfaceMode]
+    chunks.render.forEach((geometry, i) => {
+      const chunk = new Mesh(geometry, materials)
+      chunk.name = `Cavern ${i}`
+      chunk.castShadow = true
+      chunk.receiveShadow = true
+      chunk.matrixAutoUpdate = false
+      this.caveChunks.add(chunk)
+    })
+    this.caveZones = chunks.bake
+    this.attachZones()
+    this.surfaceBaker.setGeometries(chunks.bake)
+    this.surfaceStale = true
+  }
+
+  /** The live surface reads the zones per vertex; the baked one has them in its maps (its meshlets carry less). */
+  private attachZones() {
+    (this.caveChunks.children as Mesh[]).forEach((chunk, i) => {
+      if (this.surfaceMode === 'Procedural') chunk.geometry.setAttribute('aZone', this.caveZones[i].getAttribute('aZone'))
+      else chunk.geometry.deleteAttribute('aZone')
+    })
   }
 
   /** Everything that follows the field: water, lights, mist, the seed's camera pose; then a fresh bake. */
@@ -509,9 +585,20 @@ export class Hollow extends Document implements CaptureDefaults {
   }
 
   override onBeforeDraw(renderer: WebGPURenderer, delta: number) {
+    // The meshlet pipeline's own levels of detail collapse vertices across the atlas' chart seams (its simplifier is
+    // permissive about attribute seams): faces stretched over two charts read the gap between them. Culled meshlets,
+    // full detail
+    const pipeline = renderer.drawingPipeline as Partial<MeshletDrawingPipeline>
+    if (pipeline.isMeshletDrawingPipeline) pipeline.lodThreshold = MESHLET_LOD_THRESHOLD
+
     if (this.caveDirty) {
       this.rebuildCave()
       this.updateCamera(this.timeline.currentTime)
+    }
+
+    if (this.surfaceStale && this.caveChunks.children.length > 0) {
+      this.surfaceStale = false
+      if (this.surfaceMode === 'Baked') this.surfaceBaker.bake(renderer)
     }
 
     // The indirect light at this frame's levels first: the probe capture below renders with it
@@ -528,7 +615,7 @@ export class Hollow extends Document implements CaptureDefaults {
       this.envVersion = lighting.envVersion
       const lake = lighting.lakeEnvMap ? {map: lighting.lakeEnvMap.texture, probe: lighting.lakeProbe} : null
       const sky = lighting.skyEnvMap ? {map: lighting.skyEnvMap.texture, probe: lighting.skyProbe} : null
-      const lit = [this.rockMaterial, this.calciteMaterial]
+      const lit = [...this.surfaceMaterials.Baked, ...this.surfaceMaterials.Procedural]
       for (const material of [...lit, this.water.rimstoneMaterial, this.water.dropletMaterial]) {
         material.setEnv(lake, sky)
       }
@@ -540,12 +627,13 @@ export class Hollow extends Document implements CaptureDefaults {
 
   override dispose() {
     this.sculptPool.dispose()
-    this.caveMesh.geometry.dispose()
+    this.caveSurface.geometry.dispose()
+    for (const chunk of this.caveChunks.children as Mesh[]) chunk.geometry.dispose()
+    this.surfaceBaker.dispose()
     this.giMesh.geometry.dispose()
     this.lakeMesh.geometry.dispose()
     this.rimstonePoolMesh.geometry.dispose()
-    this.rockMaterial.dispose()
-    this.calciteMaterial.dispose()
+    for (const material of [...this.surfaceMaterials.Baked, ...this.surfaceMaterials.Procedural]) material.dispose()
     this.water.dispose()
     this.atmosphere.dispose()
     this.hollowLighting.dispose()
@@ -561,6 +649,7 @@ registerEditor(Hollow, {
   widgets: [
     ['cameraMode', ioOptionSelect({model: new Menu({options: [...HOLLOW_CAMERA_MODES]})}), {label: 'camera'}],
     ['display', ioOptionSelect({model: new Menu({options: [...HOLLOW_DISPLAYS]})})],
+    ['surfaceMode', ioOptionSelect({model: new Menu({options: [...HOLLOW_SURFACE_MODES]})}), {label: 'surface'}],
     ['seed', ioNumberSlider({min: 1, max: 9999, step: 1})],
     ['bakeProgress', ioNumberSlider({min: 0, max: 1, step: 0.01}), {label: 'bake'}],
     ['cameraFov', ioNumberSlider({min: 24, max: 65, step: 0.5}), {label: 'fov'}],
@@ -600,11 +689,11 @@ registerEditor(Hollow, {
       'waterLevel', 'rimstoneScale', 'stalactiteDensity', 'stalagmiteDensity', 'draperyScale', 'flowstoneDensity',
       'boulderCount',
     ],
-    Surface: ['wetness', 'iron', 'sediment', 'crust', 'relief'],
+    Surface: ['surfaceMode', 'wetness', 'iron', 'sediment', 'crust', 'relief'],
     Hidden: [
-      'camera', 'field', 'hollowLighting', 'water', 'atmosphere', 'caveGroup', 'litGroup', 'caveMesh', 'giMesh',
-      'sculptPool', 'lakeMesh', 'rimstonePoolMesh', 'rockMaterial', 'calciteMaterial',
-      'surface', 'waterLevelUniform',
+      'camera', 'field', 'hollowLighting', 'water', 'atmosphere', 'caveGroup', 'litGroup', 'caveSurface', 'caveChunks',
+      'caveZones', 'giMesh', 'sculptPool', 'lakeMesh', 'rimstonePoolMesh', 'rockMaterial', 'calciteMaterial', 'surfaceMaterials',
+      'surface', 'surfaceBaker', 'surfaceStale', 'waterLevelUniform',
       'dripEmitters', 'caveDirty', 'sculpting', 'envVersion', '_poseAppliedForSeed', '_frameTarget',
     ],
   },

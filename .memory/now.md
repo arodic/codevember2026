@@ -10,7 +10,8 @@
 - Bodies: `stalactite` (4 forms, clusters), `stalagmite` (plates, 4 forms), `flowstone` (traced lobes), drapery, rock. Rimstone dam: metric crest, proud lip, microgours, front into the lake; cascade terraces lipped + dished. ~1.13M verts, ~8 s.
 - Perf: ~23 fps headless seed 1056 (was 1.3): fewer noises, low freqs per vertex, gated noise, static fire shadow.
 - Stalactites: carrot (cone, flared root), short straws (≤ 30 cm), icicles; no `stem`. Shot: same start, end at 5× dolly / 3× truck / 5× pan (`*_REACH` in Hollow).
-- Next: user review; fire → spot light (user idea, plan 5g); flowstone on ramps still reads a bit ribbon-like; crust patches on lit ceilings; `viewClearance` doesn't know the longer shot.
+- Low-end path: meshlet pipeline (io `drawingPipeline: 'meshlet'`), cave in ~87 chunks over a 4096² atlas, surface baked (`HollowSurfaceBaker`) — `surfaceMode` Baked / Procedural. Meshlet LOD off (seam bug, plan 5j).
+- Next: user review; seam-safe LODs (5j); fire → spot light (user idea, plan 5g); flowstone on ramps still reads a bit ribbon-like; crust patches on lit ceilings; `viewClearance` doesn't know the longer shot.
 
 **2026-11-14 Day 11 Rust — volumetric material (other session than Hollow):**
 - Volume 512²×64 (1.25 µm, reduced for now); quasi-steady precipitation (no checkerboard/hot spots); compact growth; SEM draws a smooth density (botryoidal crust, rosettes); plan § 11 Update (2026-11-14).
