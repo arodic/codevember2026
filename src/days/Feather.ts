@@ -1,7 +1,7 @@
 import {
   Color, Group, MathUtils, Matrix4, NeutralToneMapping, PerspectiveCamera, Vector3, WebGPURenderer,
 } from 'three/webgpu'
-import { Register, Property, div } from '@io-gui/core'
+import { Register, Property, div, br, span } from '@io-gui/core'
 import { Bloom, Document, DocumentProps, Timeline, renderScheduler, ScheduledTicker } from '@io-gui/three'
 import { registerEditor } from '@io-gui/editors'
 import { ioNumberSlider } from '@io-gui/sliders'
@@ -679,7 +679,11 @@ export class Feather extends Document implements CaptureDefaults, CaptureListene
 }
 
 registerEditor(Feather, {
-  header: div({style: {padding: 'var(--io_spacing2)'}}, 'Codevember 2026: Feather by @arodic & cogs'),
+  header: div({style: {padding: 'var(--io_spacing2)'}}, [
+    'Codevember 2026: Feather by @arodic & cogs',
+    br(),
+    span({class: 'keymap'}, 'esc: debug'),
+  ]),
   widgets: [
     ['cameraMode', ioOptionSelect({model: new Menu({options: [...FEATHER_CAMERA_MODES]})}), {label: 'camera'}],
     ['orbitTurns', ioNumberSlider({min: -8, max: 8, step: 0.1}), {label: 'turns'}],

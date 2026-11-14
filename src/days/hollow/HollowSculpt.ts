@@ -1,7 +1,7 @@
 import {
   Box3, BufferAttribute, BufferGeometry, MathUtils, Matrix4, Quaternion, Sphere, Vector3,
 } from 'three/webgpu'
-import {HOLLOW_MAX, HOLLOW_MIN, HollowField, smax, smin} from './HollowField.js'
+import {HOLLOW_MAX, HOLLOW_MIN, HollowField, type HollowZones, createHollowRandom, smax, smin} from './HollowField.js'
 import {
   type OctreeContour, type OctreeSlab, type OctreeVisit, contourOctree, stitchSlabs, triangulateQuads,
 } from './HollowOctree.js'
@@ -34,10 +34,19 @@ export interface HollowRockBody extends HollowBodyBase {
   seed: number
 }
 
-/** A stalactite or stalagmite: a chain of round cones along its spine, fluted where its cells resolve flutes. */
-export interface HollowDripstoneBody extends HollowBodyBase {
-  kind: 'dripstone'
-  hanging: boolean
+/**
+ * The profile of a stalactite: a carrot (a flared root, then a full cone narrowing steadily to a short rounded tip),
+ * a soda straw (a short tube that hasn't thickened yet), or an icicle (a convex taper ringed by bulges).
+ */
+export type StalactiteForm = 'carrot' | 'straw' | 'icicle'
+
+/**
+ * A stalactite: a chain of round cones along its spine, fluted and ringed with fine growth ridges. Its cells follow
+ * its radius (`stalactiteCell`), so flutes resolve wherever they're wide enough to see.
+ */
+export interface HollowStalactiteBody extends HollowBodyBase {
+  kind: 'stalactite'
+  form: StalactiteForm
   /** Rings from the root (buried in the cave) to the tip: `x y z` and radius. */
   spine: Float32Array
   /** Bounding sphere of each segment between rings (`x y z`, radius with its flutes). */
@@ -47,7 +56,54 @@ export interface HollowDripstoneBody extends HollowBodyBase {
   flutes: number
   /** Flute amplitude per ring (`m`, `0` where they are too fine for its cells). */
   fluteDepth: Float32Array
+  /** Amplitude (`m`) of the fine growth ridges round it. */
+  ridge: number
   phase: number
+  /** Its cells over their finest (`≥ 1`: coarser far from the camera). */
+  coarsen: number
+}
+
+/**
+ * The profile of a stalagmite: a pagoda (flat plates stacked and narrowing), a candle (a slender column of near
+ * equal plates), a cone (tapering steeply), or a boss (a low mound).
+ */
+export type StalagmiteForm = 'pagoda' | 'candle' | 'cone' | 'boss'
+
+/** A stalagmite: ellipsoid plates stacked from its foot up and smoothly united, a splash cup in its top. */
+export interface HollowStalagmiteBody extends HollowBodyBase {
+  kind: 'stalagmite'
+  form: StalagmiteForm
+  /** Plates from the foot up: centre `x y z`, radii `x y z` and their bounding radius (`7` floats each). */
+  plates: Float32Array
+  /** Radius (`m`) of the plates' smooth union. */
+  smooth: number
+  /** Heights (`m`) of its foot and top (`t` runs from `0` to `1` between them). */
+  foot: number
+  top: number
+  /** The splash cup the drip keeps hollow in its top: centre `x y z` and radius (`0`: none). */
+  cup: Float32Array
+  /** Amplitude (`m`) of the fine growth ridges round it. */
+  ridge: number
+  phase: number
+}
+
+/**
+ * A flowstone cascade: lobes of calcite draped down the cave's surface from a seep (flattened ellipsoids in the
+ * surface's frame, stacked and smoothly united), ribbed down the flow, spreading into an apron where it levels out.
+ */
+export interface HollowFlowstoneBody extends HollowBodyBase {
+  kind: 'flowstone'
+  /**
+   * Lobes from the seep down: centre `x y z`, world -> lobe rotation (rows: across, down the flow, out of the host),
+   * radii (across, down, out), bounding radius, and `t` (`0` at the seep … `1` at the foot): `FLOW_LOBE` floats each.
+   */
+  lobes: Float32Array
+  /** Radius (`m`) of the lobes' smooth union. */
+  smooth: number
+  /** The horizontal unit across the flow (`x z`) the ribs run along, and their phase. */
+  ribs: Float32Array
+  /** Height (`m`) of its foot, where the ribs fade into the apron. */
+  footY: number
 }
 
 /**
@@ -68,7 +124,8 @@ export interface HollowDraperyBody extends HollowBodyBase {
   flutePhase: number
 }
 
-export type HollowBody = HollowRockBody | HollowDripstoneBody | HollowDraperyBody
+export type HollowBody =
+  | HollowRockBody | HollowStalactiteBody | HollowStalagmiteBody | HollowFlowstoneBody | HollowDraperyBody
 
 /** Cell size (`m`) of the cave walls; the bodies and the rimstone dam get finer cells. */
 const CAVE_CELL = 0.2
@@ -101,6 +158,8 @@ const FEATURE_BEND = 0.1
 /** Smallest cell (`m`) a crease of the cave splits into; of the rimstone dam's lip. Bodies go down to `FINEST_CELL`. */
 const CAVE_FEATURE_CELL = 0.05
 const RIM_FEATURE_CELL = 0.025
+/** Reach (`m`) either side of a cascade terrace's crest that its finer cells cover. */
+const TERRACE_LIP_REACH = 0.12
 /** A body's material spreads this × its fillet onto the cave (flowstone around a stalagmite's foot). */
 const MATERIAL_SPREAD = 2
 /** The volume's sides close the cave this far (`m`) inside it. */
@@ -186,6 +245,17 @@ export function roundCone(
   return (Math.sqrt(x2 * a2 * il2) + y * rr) * il2 - ra
 }
 
+/**
+ * An ellipsoid's distance (radii `rx ry rz`, about the origin): Quílez's bound outside (exact on the surface, close
+ * near it); inside, the gap to the ellipsoid scaled through the point (his bound blows up toward the centre).
+ */
+export function ellipsoid(x: number, y: number, z: number, rx: number, ry: number, rz: number): number {
+  const k0 = Math.hypot(x / rx, y / ry, z / rz)
+  if (k0 < 1) return (k0 - 1) * Math.min(rx, ry, rz)
+  const k1 = Math.hypot(x / (rx * rx), y / (ry * ry), z / (rz * rz))
+  return (k0 * (k0 - 1)) / k1
+}
+
 /** Cleavage planes and the radius they cut, from the unit-sphere planes of a boulder of `radii`. */
 export function rockBody(
   center: Vector3, quaternion: Quaternion, radii: Vector3, unitPlanes: Float32Array, unitBevel: number, seed: number,
@@ -231,40 +301,75 @@ export function rockBody(
   }
 }
 
-/** Radius (`m`) of a dripstone's tip: past one finest cell, so its two sides never share one. */
+/** Radius (`m`) of a stalactite's tip and of a soda straw: past one finest cell, so their two sides never share one. */
 const DRIPSTONE_TIP = 0.015
+const STRAW_RADIUS = 0.016
+/** A stalactite's cells: this fraction of its radius where they are (so flutes span four cells and up). */
+const STALACTITE_CELL = 1 / 6
+const STALACTITE_MAX_CELL = 0.04
+/** Wavelength (`m`) of the fine growth ridges round a stalactite. */
+const STALACTITE_RIDGE = 0.07
 
-export interface DripstoneSpec {
+/** Cell size (`m`) of a stalactite where its radius is `radius`, coarsened by `coarsen`. */
+function stalactiteCell(radius: number, coarsen: number) {
+  return MathUtils.clamp(radius * STALACTITE_CELL * coarsen, FINEST_CELL, STALACTITE_MAX_CELL * coarsen)
+}
+
+
+/** Radius (`m`) of a stalactite of `form` and base radius `r0` at `t` (`0` root … `1` tip). */
+function stalactiteRadius(form: StalactiteForm, r0: number, t: number, ringFreq: number, phase: number) {
+  if (form === 'straw') {
+    // A tube, flared a little where it leaves the ceiling
+    const flare = 1 - smoothstep(0, 0.15, t)
+    return STRAW_RADIUS + (r0 - STRAW_RADIUS) * flare * flare
+  }
+  if (form === 'icicle') {
+    const taper = Math.pow(Math.max(0, 1 - t), 0.68)
+    const bulge = 1 + 0.09 * Math.sin(t * ringFreq + phase) * (1 - t)
+    return Math.max(DRIPSTONE_TIP, r0 * taper * bulge + 0.008 * (1 - t * 0.5))
+  }
+  // A carrot: a cone a little fuller than straight, flared where it leaves the ceiling
+  const flare = 1 + 0.18 * (1 - smoothstep(0, 0.12, t))
+  return Math.max(DRIPSTONE_TIP, r0 * Math.pow(Math.max(0, 1 - t), 0.8) * flare + 0.006 * (1 - t))
+}
+
+/** How much of its flutes a stalactite of `form` shows at `t`. */
+function fluteEnvelope(form: StalactiteForm, t: number) {
+  if (form === 'straw') return 0
+  return smoothstep(0.06, 0.28, t) * (1 - smoothstep(0.82, 0.99, t))
+}
+
+export interface StalactiteSpec {
   anchor: Vector3
   /** The host's normal at the anchor (the root grows along it, bending plumb by a fifth of the length). */
   hostNormal: Vector3
-  hanging: boolean
+  form: StalactiteForm
   length: number
   baseRadius: number
   flutes: number
   /** Flute depth relative to the radius. */
   fluteDepth: number
-  /** Growth-ring frequency along the length and its phase. */
+  /** Bulge frequency along an icicle, and the phase of its bulges, flutes and ridges. */
   ringFreq: number
   phase: number
+  /** Its cells over their finest (`≥ 1`: coarser far from the camera). */
+  coarsen: number
 }
 
-/** Rings along the spine of a fluted stalactite (tapered icicle tip) or pagoda stalagmite (rounded dome). */
-export function dripstoneBody(spec: DripstoneSpec): HollowDripstoneBody {
-  const {anchor, hostNormal, hanging, length, baseRadius, flutes, fluteDepth, ringFreq, phase} = spec
-  const gravity = hanging ? -1 : 1
-  const cell = MathUtils.clamp(baseRadius / 3, 0.025, 0.1)
-  const tip = DRIPSTONE_TIP
-  const rings = MathUtils.clamp(Math.ceil(length / 0.06), 8, 24)
+/** Rings along the spine of a stalactite of `spec.form`. */
+export function stalactiteBody(spec: StalactiteSpec): HollowStalactiteBody {
+  const {anchor, hostNormal, form, length, baseRadius, flutes, fluteDepth, ringFreq, phase, coarsen} = spec
+  const rings = MathUtils.clamp(Math.ceil(length / 0.04), 8, 32)
 
   const spine = new Float32Array((rings + 2) * 4)
   const depth = new Float32Array(rings + 2)
   // The root ring is buried in the host
-  const rootDepth = 0.5 * baseRadius + 0.035
+  const rootRadius = 1.1 * stalactiteRadius(form, baseRadius, 0, ringFreq, phase)
+  const rootDepth = 0.5 * rootRadius + 0.035
   let cx = anchor.x - hostNormal.x * rootDepth
   let cy = anchor.y - hostNormal.y * rootDepth
   let cz = anchor.z - hostNormal.z * rootDepth
-  spine.set([cx, cy, cz, baseRadius], 0)
+  spine.set([cx, cy, cz, rootRadius], 0)
   cx = anchor.x
   cy = anchor.y
   cz = anchor.z
@@ -277,7 +382,7 @@ export function dripstoneBody(spec: DripstoneSpec): HollowDripstoneBody {
       // Along the host normal at the root, plumb by `t = 0.22`
       const plumb = smoothstep(0.0, 0.22, t)
       let dx = MathUtils.lerp(hostNormal.x, 0.0, plumb)
-      let dy = MathUtils.lerp(hostNormal.y, gravity, plumb)
+      let dy = MathUtils.lerp(hostNormal.y, -1.0, plumb)
       let dz = MathUtils.lerp(hostNormal.z, 0.0, plumb)
       const len = Math.hypot(dx, dy, dz) || 1.0
       dx /= len
@@ -287,21 +392,11 @@ export function dripstoneBody(spec: DripstoneSpec): HollowDripstoneBody {
       cy += dy * ds
       cz += dz * ds
     }
-    let radius: number
-    if (hanging) {
-      const taper = Math.pow(Math.max(0.0, 1.0 - t), 0.68)
-      const bulge = 1.0 + 0.09 * Math.sin(t * ringFreq + phase) * (1.0 - t)
-      radius = baseRadius * taper * bulge + 0.008 * (1.0 - t * 0.5)
-    } else {
-      const pagoda = 1.0 + 0.15 * Math.sin(t * ringFreq + phase) * (1.0 - smoothstep(0.82, 1.0, t))
-      const dome = Math.sqrt(Math.max(0.0, 1.0 - Math.pow(Math.max(0.0, (t - 0.72) / 0.28), 2.0)))
-      radius = baseRadius * (1.0 - 0.52 * t) * dome * pagoda
-    }
-    radius = Math.max(tip, radius)
-    // Flutes only where the cells resolve them (a wavelength of four cells and up)
-    const envelope = smoothstep(0.06, 0.28, t) * (1.0 - smoothstep(0.82, 0.99, t))
-    const wavelength = (2 * Math.PI * radius) / flutes
-    depth[r + 1] = fluteDepth * radius * envelope * smoothstep(2 * cell, 4 * cell, wavelength)
+    const radius = stalactiteRadius(form, baseRadius, t, ringFreq, phase)
+    // Flutes where its cells resolve them (a wavelength of four cells and up)
+    const cell = stalactiteCell(radius, coarsen)
+    const wavelength = (2 * Math.PI * radius) / Math.max(1, flutes)
+    depth[r + 1] = fluteDepth * radius * fluteEnvelope(form, t) * smoothstep(2 * cell, 4 * cell, wavelength)
     spine.set([cx, cy, cz, radius], (r + 1) * 4)
   }
   for (let i = 0; i < spine.length; i += 4) {
@@ -332,19 +427,171 @@ export function dripstoneBody(spec: DripstoneSpec): HollowDripstoneBody {
     fz /= fl
   }
   return {
-    kind: 'dripstone',
+    kind: 'stalactite',
+    form,
     min,
     max,
     blend: MathUtils.clamp(baseRadius, 0.05, 0.3),
-    cell,
+    // Its finest: `cellFor` follows its radius
+    cell: FINEST_CELL,
     feature: FINEST_CELL,
-    hanging,
     spine,
     segments,
     frame: new Float32Array([fx, fz, -fz, fx]),
     flutes,
     fluteDepth: depth,
+    ridge: form === 'straw' ? 0 : form === 'icicle' ? 0.0015 : 0.002,
     phase,
+    coarsen,
+  }
+}
+
+interface StalagmiteShape {
+  /** How much narrower its top plate is than its foot. */
+  taper: number
+  /** Height of a plate over its width. */
+  flat: number
+  /** Radius of the plates' smooth union, over the base radius. */
+  smooth: number
+  cup: boolean
+  /** Amplitude (`m`) of the growth ridges. */
+  ridge: number
+}
+
+const STALAGMITE_SHAPES: Record<StalagmiteForm, StalagmiteShape> = {
+  pagoda: {taper: 0.68, flat: 0.62, smooth: 0.26, cup: true, ridge: 0.003},
+  candle: {taper: 0.15, flat: 1.1, smooth: 0.6, cup: true, ridge: 0.002},
+  cone: {taper: 0.85, flat: 0.9, smooth: 0.45, cup: false, ridge: 0.002},
+  boss: {taper: 0.45, flat: 0.5, smooth: 0.3, cup: false, ridge: 0},
+}
+/** Wavelength (`m`) of a stalagmite's growth ridges. */
+const STALAGMITE_RIDGE = 0.09
+
+export interface StalagmiteSpec {
+  /** Where it stands on the floor. */
+  foot: Vector3
+  form: StalagmiteForm
+  height: number
+  baseRadius: number
+  /** How far (`m`) its top leans off its foot, and which way (radians about `y`). */
+  lean: number
+  azimuth: number
+  seed: number
+  /** Its cells over their finest (`≥ 1`: coarser far from the camera). */
+  coarsen: number
+}
+
+/** The plates of a stalagmite of `spec.form`, from its foot (sunk into the floor) up to its crown at `height`. */
+export function stalagmiteBody(spec: StalagmiteSpec): HollowStalagmiteBody {
+  const {foot, form, height, baseRadius, lean, azimuth, seed, coarsen} = spec
+  const shape = STALAGMITE_SHAPES[form]
+  const rand = createHollowRandom(seed)
+  const n = MathUtils.clamp(Math.round(height / (1.3 * shape.flat * baseRadius * (1 - shape.taper / 2))), 2, 16)
+  const radius = new Float32Array(n)
+  for (let i = 0; i < n; i++) radius[i] = baseRadius * (1 - (shape.taper * i) / (n - 1)) * (0.94 + 0.12 * rand())
+  // Spaced by their heights, the foot plate sunk into the floor, the top plate's crown at `height`
+  const along = new Float32Array(n)
+  for (let i = 1; i < n; i++) along[i] = along[i - 1] + radius[i - 1] + radius[i]
+  const y0 = foot.y + 0.35 * shape.flat * radius[0]
+  const y1 = Math.max(y0 + 0.01, foot.y + height - shape.flat * radius[n - 1])
+  const lx = Math.cos(azimuth)
+  const lz = Math.sin(azimuth)
+  const plates = new Float32Array(n * 7)
+  const min = new Vector3(Infinity, Infinity, Infinity)
+  const max = new Vector3(-Infinity, -Infinity, -Infinity)
+  for (let i = 0; i < n; i++) {
+    const t = along[i] / along[n - 1]
+    const shift = lean * t ** 1.5
+    const jitter = 0.05 * radius[i]
+    const x = foot.x + lx * shift + jitter * (rand() - 0.5)
+    const y = y0 + (y1 - y0) * t
+    const z = foot.z + lz * shift + jitter * (rand() - 0.5)
+    const rx = radius[i] * (0.94 + 0.12 * rand())
+    const ry = shape.flat * radius[i]
+    const rz = radius[i] * (0.94 + 0.12 * rand())
+    const bound = Math.max(rx, ry, rz)
+    plates.set([x, y, z, rx, ry, rz, bound], i * 7)
+    min.min(new Vector3(x - bound, y - bound, z - bound))
+    max.max(new Vector3(x + bound, y + bound, z + bound))
+  }
+  const o = (n - 1) * 7
+  const top = plates[o + 1] + plates[o + 4]
+  // The drip keeps a cup hollow in its crown
+  const cup = new Float32Array(4)
+  if (shape.cup) cup.set([plates[o], plates[o + 1] + 1.25 * plates[o + 4], plates[o + 2], 0.6 * Math.min(plates[o + 3], plates[o + 5])])
+  const cell = MathUtils.clamp((baseRadius / 8) * coarsen, FINEST_CELL, 0.03 * coarsen)
+  // Ridges where its cells resolve them
+  const ridge = shape.ridge * smoothstep(3 * cell, 5 * cell, STALAGMITE_RIDGE)
+  min.subScalar(ridge + 0.01)
+  max.addScalar(ridge + 0.01)
+  return {
+    kind: 'stalagmite',
+    form,
+    min,
+    max,
+    blend: MathUtils.clamp(0.5 * baseRadius, 0.05, 0.25),
+    cell,
+    feature: FINEST_CELL,
+    plates,
+    smooth: shape.smooth * baseRadius,
+    foot: foot.y,
+    top,
+    cup,
+    ridge,
+    phase: rand() * Math.PI * 2,
+  }
+}
+
+/** Floats per flowstone lobe (`HollowFlowstoneBody.lobes`). */
+export const FLOW_LOBE = 17
+/** Amplitude (`m`) of the ribs down a flowstone, and their wavenumber (`1/m`). */
+const FLOW_RIB = 0.008
+const FLOW_RIB_FREQ = 30
+/** Radius (`m`) of a flowstone's lobes' smooth union. */
+const FLOW_SMOOTH = 0.2
+
+/** A lobe of flowstone: a flattened ellipsoid in its host's frame. */
+export interface FlowstoneLobe {
+  centre: Vector3
+  /** Unit axes: across the flow, down it, out of the host. */
+  across: Vector3
+  down: Vector3
+  out: Vector3
+  /** Radii (`m`) along them. */
+  radii: Vector3
+  /** `0` at the seep … `1` at the foot. */
+  t: number
+}
+
+/** A flowstone cascade of `lobes` whose apron lies at `footY`. */
+export function flowstoneBody(lobes: FlowstoneLobe[], footY: number, ribPhase: number): HollowFlowstoneBody {
+  const data = new Float32Array(lobes.length * FLOW_LOBE)
+  const min = new Vector3(Infinity, Infinity, Infinity)
+  const max = new Vector3(-Infinity, -Infinity, -Infinity)
+  let ax = 0
+  let az = 0
+  lobes.forEach(({centre: c, across: a, down: d, out: n, radii: r, t}, i) => {
+    const bound = Math.max(r.x, r.y, r.z)
+    data.set([c.x, c.y, c.z, a.x, a.y, a.z, d.x, d.y, d.z, n.x, n.y, n.z, r.x, r.y, r.z, bound, t], i * FLOW_LOBE)
+    min.min(new Vector3(c.x - bound, c.y - bound, c.z - bound))
+    max.max(new Vector3(c.x + bound, c.y + bound, c.z + bound))
+    ax += a.x
+    az += a.z
+  })
+  min.subScalar(FLOW_RIB + 0.01)
+  max.addScalar(FLOW_RIB + 0.01)
+  const al = Math.hypot(ax, az) || 1
+  return {
+    kind: 'flowstone',
+    min,
+    max,
+    blend: 0.08,
+    cell: 0.03,
+    feature: 0.025,
+    lobes: data,
+    smooth: FLOW_SMOOTH,
+    ribs: new Float32Array([ax / al, az / al, ribPhase]),
+    footY,
   }
 }
 
@@ -398,15 +645,28 @@ export function draperyBody(spec: DraperySpec): HollowDraperyBody {
   }
 }
 
-/** Zones (`aZone`) of dripstone calcite, wetter toward the tip. */
-function dripstoneZones(body: HollowDripstoneBody, t: number, out: Float32Array) {
-  const wetness = body.hanging
-    ? MathUtils.clamp(0.45 + 0.55 * smoothstep(0.45, 0.95, t), 0.0, 1.0)
-    : MathUtils.clamp(0.55 + 0.35 * smoothstep(0.65, 1.0, t), 0.0, 1.0)
-  out[0] = 0.15
-  out[1] = 0.92
-  out[2] = 0.0
-  out[3] = wetness
+/**
+ * Zones (`aZone`, into `out`) of a body's own surface at `t` along it (`lastT`), its normal `ny` up: calcite on the
+ * formations, wetter toward a dripstone's tip and down a flowstone, rimstone on a flowstone's apron; a boulder takes
+ * the cave's.
+ */
+function bodyZones(body: HollowBody, t: number, ny: number, cave: HollowZones, out: Float32Array) {
+  switch (body.kind) {
+    case 'stalactite':
+      out.set([0.15, 0.92, 0, body.form === 'straw' ? 0.7 + 0.3 * t : 0.45 + 0.55 * smoothstep(0.45, 0.95, t)])
+      return
+    case 'stalagmite':
+      out.set([0.1, 0.92, 0, body.form === 'boss' ? 0.5 : 0.55 + 0.35 * smoothstep(0.65, 1, t)])
+      return
+    case 'flowstone':
+      out.set([0.05, 0.88, 0.5 * smoothstep(0.6, 0.9, ny) * smoothstep(0.5, 0.9, t), 0.6 + 0.3 * t])
+      return
+    case 'drapery':
+      out.set([0.1, 0.96, 0, 0.55 + 0.4 * t])
+      return
+    case 'rock':
+      out.set([Math.max(cave.strata, 0.55), cave.travertine, cave.rimstone, cave.wetness])
+  }
 }
 
 /**
@@ -430,10 +690,18 @@ export class HollowSculpt {
   private readonly rimMax = new Vector3()
   /** The dam's smallest radius (`m`, where `rimstoneCoord` is `1`). */
   private readonly rimRadius: number
+  /** The cascade's terraces' range in `z`. */
+  private readonly cascadeMin: number
+  private readonly cascadeMax: number
   /** Every body's index: the octree's root context. */
   private readonly all: Int32Array
-  /** Spine parameter `t` of the last dripstone distance, or `v` (down the sheet) of the last drapery distance. */
+  /**
+   * Where along its body the last distance's point is (`0 … 1`): up a stalactite's spine or a stalagmite, down a
+   * flowstone or a drapery's sheet (`v`).
+   */
   private lastT = 0
+  /** Radius (`m`) of the last stalactite distance's closest ring. */
+  private lastRadius = 0
   /** Thickness (`m`) and height above the growing edge (`m`) of the last drapery distance's sheet. */
   private readonly lastSheet = new Float32Array(2)
   /** How far (`m`, along the sheet) the last drapery distance's point is from the sheet's rim. */
@@ -473,6 +741,8 @@ export class HollowSculpt {
     const reach = field.rimstoneReach * 1.15 + 0.5
     this.rimMin.set(field.rimstoneCenter.x - reach, wl - 0.4, field.rimstoneCenter.z - reach)
     this.rimMax.set(field.rimstoneCenter.x + reach, wl + 0.55, field.rimstoneCenter.z + reach)
+    this.cascadeMin = field.cascadeEnd - 1.5
+    this.cascadeMax = field.cascadeStart + 0.5
   }
 
   private cellIndex(v: number, axis: number, n: number) {
@@ -501,13 +771,17 @@ export class HollowSculpt {
   }
 
   /**
-   * Signed distance (`m`) from `(x, y, z)` to `body` (sets `lastT` for a dripstone), exact below `limit`: beyond it,
-   * any value at least `limit`.
+   * Signed distance (`m`) from `(x, y, z)` to `body` (sets `lastT`), exact below `limit`: beyond it, any value at
+   * least `limit`.
    */
   bodyDistance(body: HollowBody, x: number, y: number, z: number, limit = Infinity): number {
-    if (body.kind === 'dripstone') return this.dripstoneDistance(body, x, y, z, limit)
-    if (body.kind === 'drapery') return this.draperyDistance(body, x, y, z)
-    return this.rockDistance(body, x, y, z)
+    switch (body.kind) {
+      case 'stalactite': return this.stalactiteDistance(body, x, y, z, limit)
+      case 'stalagmite': return this.stalagmiteDistance(body, x, y, z, limit)
+      case 'flowstone': return this.flowstoneDistance(body, x, y, z, limit)
+      case 'drapery': return this.draperyDistance(body, x, y, z)
+      case 'rock': return this.rockDistance(body, x, y, z)
+    }
   }
 
   private rockDistance(body: HollowRockBody, x: number, y: number, z: number): number {
@@ -543,7 +817,7 @@ export class HollowSculpt {
     return d
   }
 
-  private dripstoneDistance(body: HollowDripstoneBody, x: number, y: number, z: number, limit: number): number {
+  private stalactiteDistance(body: HollowStalactiteBody, x: number, y: number, z: number, limit: number): number {
     const S = body.spine
     const B = body.segments
     const rings = S.length / 4 - 1
@@ -581,7 +855,10 @@ export class HollowSculpt {
     const s2 = sx * sx + sy * sy + sz * sz
     const bestH = s2 > 0 ? MathUtils.clamp(((x - S[o]) * sx + (y - S[o + 1]) * sy + (z - S[o + 2]) * sz) / s2, 0, 1) : 0
     // Ring `0` is the buried root, ring `1` the anchor (`t = 0`)
-    this.lastT = MathUtils.clamp((best - 1 + bestH) / (rings - 1), 0, 1)
+    const t = MathUtils.clamp((best - 1 + bestH) / (rings - 1), 0, 1)
+    this.lastT = t
+    const radius = MathUtils.lerp(S[o + 3], S[o + 7], bestH)
+    this.lastRadius = radius
     const depth = MathUtils.lerp(body.fluteDepth[best], body.fluteDepth[best + 1], bestH)
     if (depth > 1e-4) {
       const cx = S[o] + sx * bestH
@@ -590,9 +867,78 @@ export class HollowSculpt {
       const ox = x - cx
       const oz = z - cz
       const theta = Math.atan2(F[2] * ox + F[3] * oz, F[0] * ox + F[1] * oz)
-      d -= depth * Math.cos(body.flutes * theta + body.phase + this.lastT * 0.8)
+      d -= depth * Math.cos(body.flutes * theta + body.phase + t * 0.8)
+    }
+    // Growth ridges round it, where its cells resolve them
+    if (body.ridge > 0) {
+      const cell = stalactiteCell(radius, body.coarsen)
+      const ridge = body.ridge * (1 - t) * smoothstep(3 * cell, 5 * cell, STALACTITE_RIDGE)
+      d -= ridge * Math.sin(y * ((2 * Math.PI) / STALACTITE_RIDGE) + body.phase)
     }
     return d
+  }
+
+  /** The smooth union of a stalagmite's plates, ridged, its cup hollowed (sets `lastT`: up it). */
+  private stalagmiteDistance(body: HollowStalagmiteBody, x: number, y: number, z: number, limit: number): number {
+    const P = body.plates
+    const k = body.smooth
+    this.lastT = MathUtils.clamp((y - body.foot) / (body.top - body.foot), 0, 1)
+    // Each plate's bounding sphere bounds its distance from below; the union is at most `k / 4` under the nearest
+    let lower = Infinity
+    for (let o = 0; o < P.length; o += 7) {
+      lower = Math.min(lower, Math.hypot(x - P[o], y - P[o + 1], z - P[o + 2]) - P[o + 6])
+    }
+    const bound = lower - 0.25 * k - body.ridge
+    if (bound >= limit) return bound
+    let d = Infinity
+    for (let o = 0; o < P.length; o += 7) {
+      const dx = x - P[o]
+      const dy = y - P[o + 1]
+      const dz = z - P[o + 2]
+      // A plate this far changes nothing
+      if (Math.hypot(dx, dy, dz) - P[o + 6] >= d + k) continue
+      const e = ellipsoid(dx, dy, dz, P[o + 3], P[o + 4], P[o + 5])
+      d = d === Infinity ? e : smin(d, e, k)
+    }
+    if (body.ridge > 0) d -= body.ridge * Math.sin(y * ((2 * Math.PI) / STALAGMITE_RIDGE) + body.phase)
+    const C = body.cup
+    if (C[3] > 0) d = smax(d, C[3] - Math.hypot(x - C[0], y - C[1], z - C[2]), 0.015)
+    return d
+  }
+
+  /** The smooth union of a flowstone's lobes, ribbed down the flow (sets `lastT`: down it, at the nearest lobe). */
+  private flowstoneDistance(body: HollowFlowstoneBody, x: number, y: number, z: number, limit: number): number {
+    const L = body.lobes
+    const k = body.smooth
+    let lower = Infinity
+    for (let o = 0; o < L.length; o += FLOW_LOBE) {
+      lower = Math.min(lower, Math.hypot(x - L[o], y - L[o + 1], z - L[o + 2]) - L[o + 15])
+    }
+    const bound = lower - 0.25 * k - FLOW_RIB
+    if (bound >= limit) return bound
+    let d = Infinity
+    let nearest = Infinity
+    for (let o = 0; o < L.length; o += FLOW_LOBE) {
+      const dx = x - L[o]
+      const dy = y - L[o + 1]
+      const dz = z - L[o + 2]
+      if (Math.hypot(dx, dy, dz) - L[o + 15] >= d + k) continue
+      const e = ellipsoid(
+        L[o + 3] * dx + L[o + 4] * dy + L[o + 5] * dz,
+        L[o + 6] * dx + L[o + 7] * dy + L[o + 8] * dz,
+        L[o + 9] * dx + L[o + 10] * dy + L[o + 11] * dz,
+        L[o + 12], L[o + 13], L[o + 14],
+      )
+      if (e < nearest) {
+        nearest = e
+        this.lastT = L[o + 16]
+      }
+      d = d === Infinity ? e : smin(d, e, k)
+    }
+    // Ribs down the flow, fading into the apron
+    const R = body.ribs
+    const rib = FLOW_RIB * smoothstep(body.footY + 0.04, body.footY + 0.3, y)
+    return d - rib * Math.cos((x * R[0] + z * R[1]) * FLOW_RIB_FREQ + 2 * Math.sin(y * 5) + R[2])
   }
 
   /** The drapery's sheet (sets `lastT` to `v` and `lastSheet`): rounded at its fringe and ends, buried at its root. */
@@ -700,9 +1046,7 @@ export class HollowSculpt {
       if (boundsDistance(body, x, y, z) >= limit) continue
       const di = this.bodyDistance(body, x, y, z, limit)
       const w = MathUtils.clamp(0.5 + (0.5 * (d - di)) / (MATERIAL_SPREAD * body.blend), 0, 1)
-      if (body.kind === 'dripstone') dripstoneZones(body, this.lastT, own)
-      else if (body.kind === 'drapery') own.set([0.1, 0.96, 0.0, 0.55 + 0.4 * this.lastT])
-      else own.set([Math.max(cave.strata, 0.55), cave.travertine, cave.rimstone, cave.wetness])
+      bodyZones(body, this.lastT, ny, cave, own)
       for (let c = 0; c < 4; c++) out[c] += (own[c] - out[c]) * w
       if (body.kind === 'drapery') {
         sheet[0] += (this.lastSheet[0] - sheet[0]) * w
@@ -723,16 +1067,25 @@ export class HollowSculpt {
     let feature = CAVE_FEATURE_CELL
     const rm = this.rimMin
     const rM = this.rimMax
+    const h = 0.5 * size
+    const r = h * Math.sqrt(3)
     if (x < rM.x && x + size > rm.x && y < rM.y && y + size > rm.y && z < rM.z && z + size > rm.z) {
-      // The dam itself (`rimstoneCoord < 1.45`), give or take the box (the coordinate runs `~1` per dam radius)
-      const u = this.field.rimstoneCoord(x + 0.5 * size, z + 0.5 * size)
+      // The dam itself (`rimstoneCoord < 1.45`), give or take the box (the coordinate runs `~1` per dam radius): its
+      // lips down to the finest cells
+      const u = this.field.rimstoneCoord(x + h, z + h)
       if (u < 1.45 + (2 * size) / this.rimRadius) {
+        cell = RIM_CELL
+        feature = FINEST_CELL
+      }
+    }
+    if (z < this.cascadeMax && z + size > this.cascadeMin) {
+      // The crests of the cascade's terraces, where they meet the floor
+      const lip = this.field.cascadeLipDistance(x + h, z + h)
+      if (lip < TERRACE_LIP_REACH + r && Math.abs(y + h - this.field.floorHeightAt(x + h, z + h, false)) < 0.25 + r) {
         cell = RIM_CELL
         feature = RIM_FEATURE_CELL
       }
     }
-    const h = 0.5 * size
-    const r = h * Math.sqrt(3)
     for (let i = 0; i < ids.length; i++) {
       const b = this.bodies[ids[i]]
       const gx = Math.max(0, b.min.x - (x + size), x - b.max.x)
@@ -742,10 +1095,12 @@ export class HollowSculpt {
       let gap = Math.sqrt(gx * gx + gy * gy + gz * gz)
       if (b.cell + CELL_GRADE * gap >= cell && gap >= b.blend) continue
       gap = Math.max(gap, Math.abs(this.bodyDistance(b, x + h, y + h, z + h)) - r)
-      cell = Math.min(cell, b.cell + CELL_GRADE * gap)
+      // A stalactite's cells follow its radius, and its flutes need no finer
+      const bodyCell = b.kind === 'stalactite' ? stalactiteCell(this.lastRadius, b.coarsen) : b.cell
+      cell = Math.min(cell, bodyCell + CELL_GRADE * gap)
       if (gap >= b.blend) continue
       const rim = b.kind === 'drapery' && this.lastRim < DRAPERY_RIM + r
-      feature = Math.min(feature, rim ? FINEST_CELL : b.feature)
+      feature = Math.min(feature, rim ? FINEST_CELL : b.kind === 'stalactite' ? bodyCell : b.feature)
     }
     this.featureCell = feature
     return cell

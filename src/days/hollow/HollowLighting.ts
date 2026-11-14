@@ -16,8 +16,8 @@ import {
 } from './HollowVertexLight.js'
 
 /** Angular radius (rad) of the fire's shadow penumbra: the flames are wide and dance, so its shadows are soft. */
-const FIRE_SHADOW_SOFTNESS = 0.1
-const FIRE_SHADOW_TAPS = 24
+const FIRE_SHADOW_SOFTNESS = 0.05
+const FIRE_SHADOW_TAPS = 16
 
 /**
  * Wide percentage-closer filter for the fire's cube shadow: `FIRE_SHADOW_TAPS` Vogel-disk directions within
@@ -79,9 +79,9 @@ export interface HollowLightLevels {
  * than a real one would be next to daylight, so it reads.
  */
 export const DEFAULT_HOLLOW_LIGHTS: HollowLightLevels = {
-  sunIlluminance: 8,
-  skyLuminance: 12.0,
-  fireIntensity: 36,
+  sunIlluminance: 16,
+  skyLuminance: 24.0,
+  fireIntensity: 72,
 }
 
 /** Uniforms the materials and the mist read: the live lights and the scale of each unit-intensity bake. */
@@ -249,6 +249,9 @@ export class HollowLighting {
     this.fire.shadow.camera.far = 40
     this.fire.shadow.bias = -0.0015
     this.fire.shadow.normalBias = 0.05
+    // The fire flickers in place: its shadow (six faces of the whole cave) is rendered while a bake runs (which
+    // reads it), then kept (`stepBake`)
+    this.fire.shadow.autoUpdate = false
     // @types/three doesn't declare `LightShadow.filterNode` (three's shadow nodes read it)
     Object.assign(this.fire.shadow, {filterNode: createFireShadowFilter(this.fire.shadow)})
 
@@ -375,6 +378,7 @@ export class HollowLighting {
     cam.far = -bounds.min.z + 0.5
     cam.updateProjectionMatrix()
     this.sun.shadow.needsUpdate = true
+    this.fire.shadow.needsUpdate = true
   }
 
   /** Sets the live levels (no rebake: the bakes are per unit source); the specular probes follow on the next frame. */
@@ -418,12 +422,7 @@ export class HollowLighting {
     const lick = 0.45 * partial(3, 0) + 0.35 * partial(4, 0) + 0.2 * partial(5, 0)
     const flicker = 0.65 * breath + 0.35 * lick
     unitLuminance(FIRE_KELVIN + 250 * flicker, this.fireTint)
-    const position = new Vector3(
-      this.fireBase.x + 0.1 * partial(2, 1.3),
-      this.fireBase.y + 0.1 * (0.5 * partial(3, 2.1) + 0.5 * partial(1, 0.4)),
-      this.fireBase.z + 0.1 * partial(4, 4.2),
-    )
-    this.setFire(this.levels.fireIntensity * (1 + 0.22 * flicker), this.fireTint, position)
+    this.setFire(this.levels.fireIntensity * (1 + 0.22 * flicker), this.fireTint, this.fireBase)
   }
 
   get baking() {
@@ -461,6 +460,7 @@ export class HollowLighting {
   }
 
   stepBake(renderer: WebGPURenderer) {
+    this.fire.shadow.autoUpdate = this.baking
     if (this.baking) {
       const step = this.bakeQueue[0]
       if (step.run(renderer)) {
@@ -481,6 +481,7 @@ export class HollowLighting {
     renderer.setRenderTarget(null)
     this.atmosphere.clear(renderer)
     this.sun.shadow.needsUpdate = true
+    this.fire.shadow.needsUpdate = true
     if (this.lightMapperDirty) {
       this.lightMapper?.dispose()
       this.lightMapper = new VertexLightMapper(renderer, this.lightRows, vxgiIrradiance(this.volume, {coneCount: 8}))

@@ -3,7 +3,7 @@ import {
   PerspectiveCamera, Scene, Vector3, WebGPURenderer,
 } from 'three/webgpu'
 import { uniform } from 'three/tsl'
-import { Register, Property, div } from '@io-gui/core'
+import { Register, Property, div, br, span } from '@io-gui/core'
 import { Bloom, Document, DocumentProps, Timeline } from '@io-gui/three'
 import { registerEditor } from '@io-gui/editors'
 import { ioNumberSlider } from '@io-gui/sliders'
@@ -871,7 +871,10 @@ function colorLuminance(color: Color) {
 }
 
 registerEditor(Fold, {
-  header: div({style: {padding: 'var(--io_spacing2)'}}, 'Codevember 2026: Fold by @arodic & cogs'),
+  header: div({style: {padding: 'var(--io_spacing2)'}}, [
+    'Codevember 2026: Fold by @arodic & cogs', br(),
+    span({class: 'keymap'}, 'esc: debug'),
+  ]),
   widgets: [
     ['cameraMode', ioOptionSelect({model: new Menu({options: [...CAMERA_MODES]})}), {label: 'camera'}],
     ['animationMode', ioOptionSelect({model: new Menu({options: [...ANIMATION_MODES]})}), {label: 'animate'}],

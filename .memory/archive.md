@@ -368,3 +368,19 @@ Complete log. Entries before 2026-11-12 11:00 were written in the io repo (packa
 - Fixed on the way: drapery/rimstone height-field normalization (holes), ellipsoid interior bound, `lighting` prop clash, empty-geometry warnings (hidden until meshed).
 - Iterated 4 headless batches: less iron, grey provinces, crust on overhangs with fractal edges, bands out of bump, fbm sediment, rimstone dry crests.
 - Checks: typecheck, lint, 60 tests (new HollowSpecimens.test.ts), build.
+
+## 2026-11-14 [hollow][q] Mesh resolution location
+- User asked where mesh resolution is controlled for sculptPool SDF→mesh.
+- Answer: HollowSculpt.ts constants + cellFor/visit; HollowOctree contourOctree; pool only slabs/workers.
+
+## 2026-11-14 [hollow] Material in the cave + specimen sculpting + perf
+- User greenlit prototype; asked: material on cave, specimen-style dripstones for variety, flowstones where appropriate, rimstone sharp like specimen but a bit softer.
+- Done: material swap (atlases gone; Surface dials; display Shaded/Layers); stalactite/stalagmite/flowstone body kinds; rimstone dam + cascade terraces with lips; tests updated (forms, flowstone, terrace crests, pool rim at waterline).
+- User: "~6M vertices, 2 fps". Measured 1.13M verts; shader + fire cube shadow per frame were the cost. -> ~23 fps headless. User idea: fire as spot (1 shadow face) -> plan 5g.
+- Misdiagnosis kept out: ceiling "speckle" was crust, not shadow normal-bias (reverted that change).
+- Checks: typecheck, lint, 60 tests, build.
+
+## 2026-11-14 [hollow] Carrot stalactites, longer shot
+- User: some stalactites super long and thin -> carrots. Dropped `stem` (carrot + straw tail), straws ≤ 30 cm, carrot = cone (1−t)^0.8 with root flare, thicker base. Test: past 35 cm still > 2.5 cm radius halfway.
+- User: camera start good; end at 5× dolly, 3× truck, 5× pan. Offsets now track·(REACH·u − 0.5). Seed 1056 path checked at 4/25/45/65/86 s: clear.
+- Checks: typecheck, lint, 60 tests, build.

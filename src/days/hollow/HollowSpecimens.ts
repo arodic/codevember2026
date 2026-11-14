@@ -1,7 +1,7 @@
 import {BufferAttribute, BufferGeometry, PlaneGeometry, SphereGeometry, Vector3} from 'three/webgpu'
 import {smax, smin} from './HollowField.js'
 import {contourOctree, triangulateQuads} from './HollowOctree.js'
-import {roundCone} from './HollowSculpt.js'
+import {ellipsoid, roundCone} from './HollowSculpt.js'
 
 /** `aSheet` thickness (`m`) of solid rock (as `HollowSculpt`'s). */
 const OPAQUE_SHEET = 1.0
@@ -74,17 +74,6 @@ function roundBox(x: number, y: number, z: number, bx: number, by: number, bz: n
   const qy = Math.abs(y) - by + r
   const qz = Math.abs(z) - bz + r
   return Math.hypot(Math.max(qx, 0), Math.max(qy, 0), Math.max(qz, 0)) + Math.min(Math.max(qx, qy, qz), 0) - r
-}
-
-/**
- * An ellipsoid's distance: Quílez's bound outside (exact on the surface, close near it); inside, the gap to the
- * ellipsoid scaled through the point (his bound blows up toward the centre).
- */
-function ellipsoid(x: number, y: number, z: number, rx: number, ry: number, rz: number) {
-  const k0 = Math.hypot(x / rx, y / ry, z / rz)
-  if (k0 < 1) return (k0 - 1) * Math.min(rx, ry, rz)
-  const k1 = Math.hypot(x / (rx * rx), y / (ry * ry), z / (rz * rz))
-  return (k0 * (k0 - 1)) / k1
 }
 
 /** How much the beds of a face with normal `ny` up show (`aZone.x`, as `HollowField.zonesAt`). */

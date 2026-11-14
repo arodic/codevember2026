@@ -3,7 +3,7 @@ import {
   WebGPURenderer,
 } from 'three/webgpu'
 import {uniform} from 'three/tsl'
-import {Register, Property, Field, div} from '@io-gui/core'
+import {Register, Property, Field, div, br, span} from '@io-gui/core'
 import {Bloom, Document, DocumentProps, FrameTarget, Timeline} from '@io-gui/three'
 import {registerEditor} from '@io-gui/editors'
 import {ioNumberSlider} from '@io-gui/sliders'
@@ -21,20 +21,27 @@ import {
 } from './hollow/HollowLighting.js'
 import {HollowWater, HollowWaterMaterial} from './hollow/HollowWater.js'
 import {HollowAtmosphere} from './hollow/HollowAtmosphere.js'
-import {
-  HollowLitMaterial, bakeRockDetailAtlas, bakeTravertineAtlas, createHollowRockMaterial,
-} from './hollow/HollowMaterial.js'
+import {HollowLitMaterial, createHollowRockMaterial} from './hollow/HollowMaterial.js'
+import {type HollowSurfaceControls, createHollowSurfaceControls} from './hollow/HollowSurface.js'
 
 const DURATION = 90
 const FADE_SECONDS = 2.5
+/**
+ * How far the shot travels, in its tracks (`trackForward`, `trackLateral`, `trackLookDrift`): it starts half a track
+ * before the seed's pose and dollies on five tracks, trucks three and pans five.
+ */
+const DOLLY_REACH = 5
+const TRUCK_REACH = 3
+const PAN_REACH = 5
 /** Cluster size (`m`) of the cave's stand-in for the GI voxelizer: under its sub-voxels (`~11 cm`). */
 const GI_PROXY_CELL = 0.06
 
 export const HOLLOW_CAMERA_MODES = ['Cinema', 'Cutaway Overview'] as const
 export type HollowCameraMode = typeof HOLLOW_CAMERA_MODES[number]
 
-export const HOLLOW_BLOCKOUT_STYLES = ['Lit Rock', 'Geological Zones'] as const
-export type HollowBlockoutStyle = typeof HOLLOW_BLOCKOUT_STYLES[number]
+/** The surface shaded, or its layers in false colour (`HollowSurface`). */
+export const HOLLOW_DISPLAYS = ['Shaded', 'Layers'] as const
+export type HollowDisplay = typeof HOLLOW_DISPLAYS[number]
 
 const CUTAWAY_POSE = {
   position: new Vector3(16.5, 13.2, 13.5),
@@ -55,8 +62,8 @@ export class Hollow extends Document implements CaptureDefaults {
   @Property({type: String, value: 'Cinema'})
   declare cameraMode: HollowCameraMode
 
-  @Property({type: String, value: 'Lit Rock'})
-  declare blockoutStyle: HollowBlockoutStyle
+  @Property({type: String, value: 'Shaded'})
+  declare display: HollowDisplay
 
   @Property({type: Number, value: DEFAULT_HOLLOW_PARAMS.seed})
   declare seed: number
@@ -112,8 +119,31 @@ export class Hollow extends Document implements CaptureDefaults {
   @Property({type: Number, value: 1.0})
   declare draperyScale: number
 
+  @Property({type: Number, value: 1.0})
+  declare flowstoneDensity: number
+
   @Property({type: Number, value: 10})
   declare boulderCount: number
+
+  /** Added to the wetness the cave's field gives its surface (`-1 … 1`). */
+  @Property({type: Number, value: 0})
+  declare wetness: number
+
+  /** Cover of iron-oxide stains (`1` as found). */
+  @Property({type: Number, value: 1})
+  declare iron: number
+
+  /** Cover of mud and dust on what faces up. */
+  @Property({type: Number, value: 1})
+  declare sediment: number
+
+  /** Cover of dry white crust on steep and overhanging rock. */
+  @Property({type: Number, value: 1})
+  declare crust: number
+
+  /** Depth of the relief the surface adds to the mesh. */
+  @Property({type: Number, value: 1})
+  declare relief: number
 
   /** Read-only GI bake progress (`0..1`). */
   @Property({type: Number, value: 0})
@@ -153,7 +183,8 @@ export class Hollow extends Document implements CaptureDefaults {
   /** The rock; the translucent calcite of the drapery sheets. */
   declare private rockMaterial: HollowLitMaterial
   declare private calciteMaterial: HollowLitMaterial
-  declare private styleModeUniform: UniformNode<'float', number>
+  /** The surface's dials, shared by the rock and the calcite. */
+  declare private surface: HollowSurfaceControls
   declare private waterLevelUniform: UniformNode<'float', number>
   declare private dripEmitters: Vector3[]
   declare private caveDirty: boolean
@@ -185,7 +216,8 @@ export class Hollow extends Document implements CaptureDefaults {
     this.scene.background = new Color(0x000000)
 
     this.field = new HollowField()
-    this.styleModeUniform = uniform(this.blockoutStyle === 'Geological Zones' ? 1 : 0)
+    this.surface = createHollowSurfaceControls()
+    this.applySurface()
     this.waterLevelUniform = uniform(this.waterLevel)
     this.dripEmitters = []
     this.caveDirty = false
@@ -201,14 +233,7 @@ export class Hollow extends Document implements CaptureDefaults {
     this.water = new HollowWater(this.field, this.atmosphere)
     this.scene.add(this.water.dropletMesh)
 
-    const rockAtlas = bakeRockDetailAtlas(1024)
-    const travertineAtlas = bakeTravertineAtlas(1024)
-    const rock = {
-      rockAtlas,
-      travertineAtlas,
-      styleMode: this.styleModeUniform,
-      lightMapNode: this.hollowLighting.lightMapNode,
-    }
+    const rock = {surface: this.surface, lightMapNode: this.hollowLighting.lightMapNode}
     this.rockMaterial = createHollowRockMaterial({...rock, name: 'Hollow Karst Rock'})
     this.calciteMaterial = createHollowRockMaterial({
       ...rock,
@@ -292,13 +317,27 @@ export class Hollow extends Document implements CaptureDefaults {
   stalactiteDensityChanged() { this.markCaveDirty() }
   stalagmiteDensityChanged() { this.markCaveDirty() }
   draperyScaleChanged() { this.markCaveDirty() }
+  flowstoneDensityChanged() { this.markCaveDirty() }
   boulderCountChanged() { this.markCaveDirty() }
 
-  blockoutStyleChanged() {
-    if (!this.styleModeUniform) return
-    this.styleModeUniform.value = this.blockoutStyle === 'Geological Zones' ? 1 : 0
+  /** The surface's dials from the inspector (uniforms: nothing recompiles). */
+  private applySurface() {
+    if (!this.surface) return
+    this.surface.debug.value = this.display === 'Layers' ? 1 : 0
+    this.surface.wetness.value = this.wetness
+    this.surface.iron.value = this.iron
+    this.surface.sediment.value = this.sediment
+    this.surface.crust.value = this.crust
+    this.surface.relief.value = this.relief
     this.notify({kind: 'material'})
   }
+
+  displayChanged() { this.applySurface() }
+  wetnessChanged() { this.applySurface() }
+  ironChanged() { this.applySurface() }
+  sedimentChanged() { this.applySurface() }
+  crustChanged() { this.applySurface() }
+  reliefChanged() { this.applySurface() }
 
   cameraModeChanged() { this.refreshCamera() }
   cameraFovChanged() { this.refreshCamera() }
@@ -370,6 +409,7 @@ export class Hollow extends Document implements CaptureDefaults {
       stalactiteDensity: this.stalactiteDensity,
       stalagmiteDensity: this.stalagmiteDensity,
       draperyScale: this.draperyScale,
+      flowstoneDensity: this.flowstoneDensity,
     })
     const bodies = [...placeHollowRocks(field, Math.round(this.boulderCount)), ...speleothems.bodies]
     this.bakeProgress = 0
@@ -446,13 +486,14 @@ export class Hollow extends Document implements CaptureDefaults {
     const startZ = pose.startZ
     const baseY = this.waterLevel + this.cameraHeight
 
-    const camX = startX + this.trackLateral * (easedU - 0.5)
-    const camZ = startZ - this.trackForward * (easedU - 0.5)
+    // From where the tracks start (half a track before the seed's pose), on past them
+    const camX = startX + this.trackLateral * (TRUCK_REACH * easedU - 0.5)
+    const camZ = startZ - this.trackForward * (DOLLY_REACH * easedU - 0.5)
 
     const benchFloor = this.field.floorHeightAt(camX, camZ, true)
     const camY = Math.max(baseY, benchFloor + 0.42)
 
-    const targetX = pose.targetX + this.trackLookDrift * (easedU - 0.5)
+    const targetX = pose.targetX + this.trackLookDrift * (PAN_REACH * easedU - 0.5)
     const targetY = this.waterLevel + pose.targetY
     const targetZ = pose.targetZ
 
@@ -513,10 +554,13 @@ export class Hollow extends Document implements CaptureDefaults {
 }
 
 registerEditor(Hollow, {
-  header: div({style: {padding: 'var(--io_spacing2)'}}, 'Codevember 2026: Hollow by @arodic & cogs'),
+  header: div({style: {padding: 'var(--io_spacing2)'}}, [
+    'Codevember 2026: Hollow by @arodic & cogs', br(),
+    span({class: 'keymap'}, 'esc: debug'),
+  ]),
   widgets: [
     ['cameraMode', ioOptionSelect({model: new Menu({options: [...HOLLOW_CAMERA_MODES]})}), {label: 'camera'}],
-    ['blockoutStyle', ioOptionSelect({model: new Menu({options: [...HOLLOW_BLOCKOUT_STYLES]})}), {label: 'style'}],
+    ['display', ioOptionSelect({model: new Menu({options: [...HOLLOW_DISPLAYS]})})],
     ['seed', ioNumberSlider({min: 1, max: 9999, step: 1})],
     ['bakeProgress', ioNumberSlider({min: 0, max: 1, step: 0.01}), {label: 'bake'}],
     ['cameraFov', ioNumberSlider({min: 24, max: 65, step: 0.5}), {label: 'fov'}],
@@ -535,22 +579,32 @@ registerEditor(Hollow, {
     ['stalactiteDensity', ioNumberSlider({min: 0.0, max: 2.0, step: 0.05}), {label: 'stalactites'}],
     ['stalagmiteDensity', ioNumberSlider({min: 0.0, max: 2.0, step: 0.05}), {label: 'stalagmites'}],
     ['draperyScale', ioNumberSlider({min: 0.0, max: 1.8, step: 0.05}), {label: 'draperies'}],
+    ['flowstoneDensity', ioNumberSlider({min: 0.0, max: 2.0, step: 0.05}), {label: 'flowstones'}],
     ['boulderCount', ioNumberSlider({min: 0, max: 24, step: 1}), {label: 'boulders'}],
+    ['wetness', ioNumberSlider({min: -1, max: 1, step: 0.01})],
+    ['iron', ioNumberSlider({min: 0, max: 2, step: 0.01})],
+    ['sediment', ioNumberSlider({min: 0, max: 2, step: 0.01})],
+    ['crust', ioNumberSlider({min: 0, max: 2, step: 0.01})],
+    ['relief', ioNumberSlider({min: 0, max: 2, step: 0.01})],
     ['sunIlluminance', ioNumberSlider({min: 0, max: 200, step: 1}), {label: 'sun'}],
     ['skyLuminance', ioNumberSlider({min: 0, max: 20, step: 0.1}), {label: 'sky'}],
     ['fireIntensity', ioNumberSlider({min: 0, max: 800, step: 5}), {label: 'fire'}],
     ['mistDensity', ioNumberSlider({min: 0, max: 0.2, step: 0.002}), {label: 'mist'}],
   ],
   groups: {
-    Main: ['goFullscreen', 'cameraMode', 'blockoutStyle', 'seed', 'randomizeSeed', 'rebakeLighting', 'bakeProgress'],
+    Main: ['goFullscreen', 'cameraMode', 'display', 'seed', 'randomizeSeed', 'rebakeLighting', 'bakeProgress'],
     Lights: ['sunIlluminance', 'skyLuminance', 'fireIntensity', 'mistDensity'],
     Camera: ['cameraFov', 'cameraHeight', 'trackForward', 'trackLateral', 'trackLookDrift'],
     Cavern: ['cavernWidth', 'vaultHeight', 'meander', 'strataStrength', 'skylightSize', 'terraceSteps'],
-    Features: ['waterLevel', 'rimstoneScale', 'stalactiteDensity', 'stalagmiteDensity', 'draperyScale', 'boulderCount'],
+    Features: [
+      'waterLevel', 'rimstoneScale', 'stalactiteDensity', 'stalagmiteDensity', 'draperyScale', 'flowstoneDensity',
+      'boulderCount',
+    ],
+    Surface: ['wetness', 'iron', 'sediment', 'crust', 'relief'],
     Hidden: [
       'camera', 'field', 'hollowLighting', 'water', 'atmosphere', 'caveGroup', 'litGroup', 'caveMesh', 'giMesh',
       'sculptPool', 'lakeMesh', 'rimstonePoolMesh', 'rockMaterial', 'calciteMaterial',
-      'styleModeUniform', 'waterLevelUniform',
+      'surface', 'waterLevelUniform',
       'dripEmitters', 'caveDirty', 'sculpting', 'envVersion', '_poseAppliedForSeed', '_frameTarget',
     ],
   },

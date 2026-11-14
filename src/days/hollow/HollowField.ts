@@ -7,8 +7,26 @@ export const HOLLOW_SIZE = new Vector3().subVectors(HOLLOW_MAX, HOLLOW_MIN)
 
 /** Elevation of the stepped foreground rimstone (`gour`) water meniscus above `waterLevel`. */
 export const RIMSTONE_POOL_STEP = 0.085
+/** Floor of the rimstone pool, and the crest the water stands just under (`m` above `waterLevel`). */
+const RIM_BASIN = 0.025
+const RIM_CREST = RIMSTONE_POOL_STEP + 0.012
+/** Height (`m`) of the lip standing proud of a rimstone crest, and its width (`m`: `exp(-(s / width)²)`). */
+const RIM_LIP = 0.035
+const RIM_LIP_WIDTH = 0.03
 /** Crest height of the calcified rimstone dam lip above `waterLevel`. */
-export const RIMSTONE_LIP_HEIGHT = 0.16
+export const RIMSTONE_LIP_HEIGHT = RIM_CREST + RIM_LIP
+/** Run (`m`) of a dam's faces. */
+const RIM_FACE = 0.06
+/** Microgours stepping down outside the dam: how many, each one's drop and lip (`m`). */
+const MICROGOURS = 2
+const MICROGOUR_DROP = 0.04
+const MICROGOUR_LIP = 0.02
+/** Slope of the dam's front, past its microgours, down into the lake. */
+const RIM_FRONT_SLOPE = 2.5
+/** The cascade's terraces: their crests' lips and the dish of the pools behind them (`m`), their risers' slope. */
+const TERRACE_LIP = 0.03
+const TERRACE_DISH = 0.02
+const TERRACE_RISER_SLOPE = 1.3
 
 /** Seed-driven cinema framing pose (`1 unit = 1 m`) used by `Hollow` dolly start / look-at. */
 export interface HollowCinemaPose {
@@ -92,6 +110,30 @@ function smoothstep(edge0: number, edge1: number, x: number): number {
   return t * t * (3.0 - 2.0 * t)
 }
 
+/** A lip standing proud of a crest `s` (`m`) away. */
+function lip(s: number, height: number): number {
+  const u = s / RIM_LIP_WIDTH
+  return height * Math.exp(-u * u)
+}
+
+/**
+ * The rimstone dam's surface (`m` above the water) `s` metres outside its crest (`< 0` inside): the pool's floor, a
+ * short inner face up to the crest with its proud lip, then microgours `w` (`m`) apart stepping down outside, each
+ * holding a little water behind a lip of its own, then the dam's front falling into the lake.
+ */
+function rimstoneProfile(s: number, w: number): number {
+  if (s < 0) return RIM_BASIN + (RIM_CREST - RIM_BASIN) * smoothstep(-RIM_FACE - 0.01, -0.005, s) + lip(s, RIM_LIP)
+  let h = RIM_CREST + lip(s, RIM_LIP)
+  for (let k = 0; k < MICROGOURS; k++) {
+    const crest = k * w
+    if (k > 0) h += lip(s - crest, MICROGOUR_LIP)
+    h -= MICROGOUR_DROP * smoothstep(crest + 0.005, crest + 0.005 + RIM_FACE, s)
+  }
+  // A smooth knee into the front
+  const past = s - MICROGOURS * w
+  return h - RIM_FRONT_SLOPE * 0.5 * (past + Math.sqrt(past * past + 0.0025))
+}
+
 /**
  * Seeded 3D karst signed distance field (`phi > 0` = open cavern/sky air, `phi < 0` = solid limestone,
  * `grad(phi)` = surface normal pointing into open air).
@@ -168,9 +210,14 @@ export class HollowField {
   private fireAlcoveRz = 2.6
   private spillPillar = new Vector3(-3.4, 1.4, 8.2)
   private lakeExtentCache: HollowLakeExtent | null = null
-  /** Last `spineX` (`z`, value) and `rimstoneCoord` (`x`, `z`, value): a sample repeats them for its column. */
+  /**
+   * Last `spineX` (`z`, value) and `rimstoneCoord` (`x`, `z`, value, metres per unit of it there): a sample repeats
+   * them for its column.
+   */
   private readonly memoSpine = new Float64Array(2).fill(NaN)
-  private readonly memoRim = new Float64Array(3).fill(NaN)
+  private readonly memoRim = new Float64Array(4).fill(NaN)
+  /** How far (`m`) the last `terrace` point lies from its nearest crest. */
+  private lastLip = Infinity
 
   constructor(params?: Partial<HollowFieldParams>) {
     this.configure(params ?? {})
@@ -191,9 +238,13 @@ export class HollowField {
     return Math.max(this.rimRx, this.rimRz) * Math.max(0.35, this.params.rimstoneScale) * 1.6
   }
 
-  /** z where the rear travertine cascade starts climbing out of the lake. */
+  /** z where the rear travertine cascade starts climbing out of the lake, and where it tops out. */
   get cascadeStart() {
     return this.cascadeStartZ
+  }
+
+  get cascadeEnd() {
+    return this.cascadeEndZ
   }
 
   configure(partial: Partial<HollowFieldParams>) {
@@ -510,25 +561,81 @@ export class HollowField {
     return memo[2] = this.computeRimstoneCoord(x, z)
   }
 
+  /** Signed distance (`m`, `< 0` inside) from the rimstone dam's crest (`rimstoneCoord = 0.92`), near the dam. */
+  rimstoneCrestDistance(x: number, z: number): number {
+    const u = this.rimstoneCoord(x, z)
+    return (u - 0.92) * this.memoRim[3]
+  }
+
+  /** Sets `memoRim[3]`: metres per unit of the coordinate (its gradient's, but for the scallops' turn). */
   private computeRimstoneCoord(x: number, z: number): number {
     const scale = Math.max(0.35, this.params.rimstoneScale)
     const dx = x - this.rimstoneCenter.x
     const dz = z - this.rimstoneCenter.z
     const c = this.rimRotC
     const s = this.rimRotS
-    const lx = (c * dx + s * dz) / (this.rimRx * scale)
-    const lz = (-s * dx + c * dz) / (this.rimRz * scale)
+    const ax = this.rimRx * scale
+    const az = this.rimRz * scale
+    const lx = (c * dx + s * dz) / ax
+    const lz = (-s * dx + c * dz) / az
     // Kidney indentation on the lakeward side
     const kidneyX = lx - 0.18 * lz * lz
     const radius = Math.sqrt(kidneyX * kidneyX + lz * lz)
-    // The scallops scale it by `1 / (0.818 … 1.182)`: far out it's past every threshold (`≤ 1.45`) anyway
-    if (radius > 1.75) return radius
+    // The radius' gradient: along the dam's axes (orthonormal), through the kidney's bend
+    const gx = kidneyX / (radius * ax)
+    const gz = (lz * (1 - 0.36 * kidneyX)) / (radius * az)
+    const metres = radius > 1e-6 ? 1 / Math.hypot(gx, gz) : Math.sqrt(ax * az)
+    // The scallops scale it by `1 / (0.818 … 1.182)`: far out it's past every threshold (`≤ 2.2`) anyway
+    if (radius > 2.75) {
+      this.memoRim[3] = metres
+      return radius
+    }
     const angle = Math.atan2(lz, kidneyX)
     const organic = 1.0
       + 0.10 * Math.cos(2.0 * angle + this.rimPhase1)
       + 0.06 * Math.sin(3.0 * angle + this.rimPhase2)
       + 0.022 * Math.cos(9.0 * angle)
+    this.memoRim[3] = metres * organic
     return radius / organic
+  }
+
+  /**
+   * Height (`m`) of the cascade's terraces over its foot at `(x, z)`, the spine at `cx` (sets `lastLip`): rimstone
+   * pools stepping up toward the rear, each dished a little behind a lobate crest with a proud lip.
+   */
+  private terrace(x: number, z: number, cx: number): number {
+    const steps = Math.max(3, Math.round(this.params.terraceSteps))
+    // The crests arc across the cascade and wander in lobes
+    const wx = x - cx
+    const a1 = x * 2.1 + this.rimPhase1
+    const a2 = x * 5.3 + this.rimPhase2
+    const arcZ = z + 0.065 * wx * wx + 0.11 * Math.sin(a1) + 0.05 * Math.sin(a2)
+    const arcSlope = 0.13 * wx + 0.231 * Math.cos(a1) + 0.265 * Math.cos(a2)
+    const e0 = this.cascadeStartZ - 0.2
+    const e1 = this.cascadeEndZ + 0.2
+    const c = MathUtils.clamp((arcZ - e0) / (e1 - e0), 0, 1)
+    const stepCoord = c * c * (3 - 2 * c) * steps
+    // Run (`m`, across the crests) of a step here, and of its riser
+    const perMetre = ((6 * c * (1 - c) * steps) / Math.abs(e1 - e0)) * Math.sqrt(1 + arcSlope * arcSlope)
+    const run = 1 / Math.max(perMetre, 1 / 3)
+    const riser = Math.min(0.6, this.cascadeRise / steps / TERRACE_RISER_SLOPE / run)
+    const index = Math.floor(stepCoord)
+    const f = stepCoord - index
+    // Each riser tops out at a crest (`f = 0.96`); behind it, up the tread, its pool
+    const crest = 0.96
+    const behind = f >= crest ? f - crest : f + 1 - crest
+    this.lastLip = Math.min(behind, 1 - behind) * run
+    const tread = (1 - riser) * run
+    const m = behind * run
+    const dish = TERRACE_DISH * smoothstep(0.02, 0.15, m) * (1 - smoothstep(tread - 0.15, tread - 0.02, m))
+    return ((index + smoothstep(crest - riser, crest, f)) / steps) * this.cascadeRise + lip(this.lastLip, TERRACE_LIP) - dish
+  }
+
+  /** How far (`m`) `(x, z)` lies from the nearest crest of the cascade's terraces (`Infinity` off the cascade). */
+  cascadeLipDistance(x: number, z: number): number {
+    if (smoothstep(this.cascadeStartZ + 0.2, this.cascadeStartZ - 1.2, z) <= 0) return Infinity
+    this.terrace(x, z, this.spineX(z))
+    return this.lastLip
   }
 
   /** Mask `1` strictly inside the stepped rimstone water meniscus, `0` outside its calcified lip. */
@@ -582,42 +689,29 @@ export class HollowField {
       floorY = MathUtils.lerp(floorY, Math.max(floorY, benchY), w)
     }
 
-    // 5. Rear terraced travertine cascade climbing into the skylight chamber
+    // 5. Rear cascade climbing into the skylight chamber: rimstone terraces
     const cascadeT = smoothstep(this.cascadeStartZ, this.cascadeEndZ, z)
     if (cascadeT > 0.0) {
-      const arcZ = z + 0.065 * (x - cx) * (x - cx)
-      const rawClimb = smoothstep(this.cascadeStartZ - 0.2, this.cascadeEndZ + 0.2, arcZ)
-      const steps = Math.max(3, Math.round(this.params.terraceSteps))
-      const stepCoord = rawClimb * steps
-      const stepIndex = Math.floor(stepCoord)
-      const stepFrac = stepCoord - stepIndex
-      const terraced = (stepIndex + smoothstep(0.68, 0.96, stepFrac)) / steps
       const bankSlope = 0.065 * Math.max(0.0, Math.abs(dx) - 2.1) * Math.max(0.0, Math.abs(dx) - 2.1)
-      const cascadeY = wl + 0.05 + terraced * this.cascadeRise + bankSlope
+      const cascadeY = wl + 0.05 + this.terrace(x, z, cx) + bankSlope
       const blendZ0 = this.cascadeStartZ + 0.2
       const blendZ1 = this.cascadeStartZ - 1.2
       floorY = MathUtils.lerp(floorY, Math.max(floorY, cascadeY), smoothstep(blendZ0, blendZ1, z))
     }
 
-    // 6. Foreground stepped rimstone (`gour`) dam & shallow sinter basin (either shore — seed-placed)
-    // Interior always stays a shallow meniscus above `waterLevel` (overrides benches that might otherwise lift it).
+    // 6. Foreground rimstone (`gour`) dam & shallow sinter basin (either shore — seed-placed): a crest with a proud lip
+    // (`rimstoneCoord ≈ 0.92`), microgours stepping down outside, a front falling into the lake (out to `2.2`, where
+    // it's under any floor). Inside it's always the pool (never a bench)
     if (this.params.rimstoneScale > 0.05) {
       const u = this.rimstoneCoord(x, z)
-      if (u < 1.45) {
-        const basinFloor = wl + 0.025
-        // Scalloped calcified rim crest around `u = 0.92`
-        const lipBell = Math.exp(-Math.pow((u - 0.92) / 0.11, 2.0))
-        const crenulation = withDetail ? 0.012 * this.noise3(x * 3.2, 0.5, z * 3.2) : 0.0
-        const damSurface = basinFloor + (RIMSTONE_LIP_HEIGHT - 0.025 + crenulation) * lipBell
-        const apronFade = 1.0 - smoothstep(0.95, 1.38, u)
-        if (u < 0.92) {
-          // Inside dam: blend toward shallow basin / lip crest, never inherit elevated bench floors
-          floorY = MathUtils.lerp(basinFloor, damSurface, MathUtils.clamp(lipBell, 0, 1))
-        } else {
-          const targetRimY = MathUtils.lerp(floorY, damSurface, apronFade)
-          const blendIn = 1.0 - smoothstep(1.02, 1.40, u)
-          floorY = MathUtils.lerp(floorY, Math.max(floorY, targetRimY), blendIn)
-        }
+      if (u < 2.2) {
+        const metres = this.memoRim[3]
+        // The crest wanders a few centimetres, and its height a few millimetres
+        const s = (u - 0.92) * metres + 0.022 * this.noise3(x * 6.0, 2.5, z * 6.0) + 0.01 * this.noise3(x * 15, 4.5, z * 15)
+        const crenulation = 0.006 * this.noise3(x * 3.2, 0.5, z * 3.2) * smoothstep(-0.1, 0.0, s)
+        const dam = wl + rimstoneProfile(s, MathUtils.clamp(0.12 * metres, 0.1, 0.22)) + crenulation
+        if (u < 0.92) floorY = dam
+        else floorY = MathUtils.lerp(floorY, Math.max(floorY, dam), 1.0 - smoothstep(1.95, 2.15, u))
       }
     }
 
@@ -854,9 +948,20 @@ export class HollowField {
   zonesAt(x: number, y: number, z: number, normalY: number): HollowZones {
     const wl = this.params.waterLevel
     const uRim = this.rimstoneCoord(x, z)
-    const rimstone = (1.0 - smoothstep(0.85, 1.32, uRim)) * (1.0 - smoothstep(wl + 0.35, wl + 0.85, y))
-    const cascadeTravertine = smoothstep(this.cascadeStartZ + 0.2, this.cascadeStartZ - 2.5, z)
-      * (1.0 - smoothstep(wl + this.cascadeRise + 0.5, wl + this.cascadeRise + 1.7, y)) * smoothstep(0.25, 0.75, normalY)
+    const cascade = smoothstep(this.cascadeStartZ + 0.2, this.cascadeStartZ - 2.5, z)
+      * (1.0 - smoothstep(wl + this.cascadeRise + 0.5, wl + this.cascadeRise + 1.7, y))
+    const cascadeTravertine = cascade * smoothstep(0.25, 0.75, normalY)
+    // Rimstone on the dam and over the cascade's terraces, their risers too: wet in the pools, drier on the crests
+    // the water spills over only now and then
+    const dam = (1.0 - smoothstep(0.85, 1.32, uRim)) * (1.0 - smoothstep(wl + 0.35, wl + 0.85, y))
+    // (In the channel: its banks are travertine)
+    const channel = 1.0 - smoothstep(2.0, 3.2, Math.abs(x - this.spineX(z)) / this.widthScale)
+    const terraces = cascade * channel * smoothstep(0.35, 0.6, normalY) * 0.9
+    const rimstone = Math.max(dam, terraces)
+    const damWet = dam > 0 ? dam * (0.5 + 0.4 * smoothstep(0.01, 0.07, Math.abs(this.rimstoneCrestDistance(x, z)))) : 0
+    const terraceWet = terraces > 0
+      ? terraces * (0.4 + 0.5 * smoothstep(0.01, 0.08, this.cascadeLipDistance(x, z)))
+      : 0
     const galleryFlowstone = smoothstep(2.8, 5.2, (x - this.spineX(z)) * this.gallerySide)
       * smoothstep(wl + 0.6, wl + 1.3, y) * (1.0 - smoothstep(wl + 3.0, wl + 4.2, y)) * 0.65
     const travertine = MathUtils.clamp(Math.max(cascadeTravertine, galleryFlowstone, rimstone * 0.85), 0.0, 1.0)
@@ -864,7 +969,9 @@ export class HollowField {
 
     const shorelineCapillary = 1.0 - smoothstep(wl - 0.05, wl + 0.72, y)
     const seepStreaks = smoothstep(0.2, 0.75, this.noise3(x * 0.85, y * 0.18, z * 0.85)) * 0.45
-    const wetness = MathUtils.clamp(Math.max(shorelineCapillary, rimstone * 0.9, cascadeTravertine * 0.75, seepStreaks), 0.0, 1.0)
+    const wetness = MathUtils.clamp(
+      Math.max(shorelineCapillary, damWet, terraceWet, cascadeTravertine * 0.4, seepStreaks), 0.0, 1.0,
+    )
     return {strata, travertine, rimstone, wetness}
   }
 }

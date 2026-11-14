@@ -73,7 +73,8 @@ export function buildHollowLakeGeometry(field: HollowField, cellSize = 0.2): Buf
 
 /**
  * Builds the slightly elevated (`+8.5 cm`) shallow amber mineral water meniscus enclosed inside the seed-placed
- * scalloped rimstone (`gour`) dam: each sector's rim is found by bisecting `rimstoneCoord` along its ray.
+ * scalloped rimstone (`gour`) dam: each sector's rim is found along its ray where the dam's inner face rises out of
+ * the water (just under the floor, so the rock hides the water's edge).
  */
 export function buildRimstonePoolGeometry(field: HollowField, rings = 22, sectors = 64): BufferGeometry {
   const reach = field.rimstoneReach
@@ -93,14 +94,22 @@ export function buildRimstonePoolGeometry(field: HollowField, rings = 22, sector
       const worldDirX = Math.cos(theta)
       const worldDirZ = Math.sin(theta)
 
+      // The crest's ray out to `rimstoneCoord = 0.95`, then the waterline on the face inside it
       let lo = 0.0
       let hi = reach
       for (let b = 0; b < 14; b++) {
         const mid = 0.5 * (lo + hi)
-        if (field.rimstoneCoord(cx + worldDirX * mid, cz + worldDirZ * mid) < 0.905) lo = mid
+        if (field.rimstoneCoord(cx + worldDirX * mid, cz + worldDirZ * mid) < 0.95) lo = mid
         else hi = mid
       }
-      const rEdge = 0.5 * (lo + hi) * radialT
+      hi = lo
+      lo = 0.0
+      for (let b = 0; b < 14; b++) {
+        const mid = 0.5 * (lo + hi)
+        if (field.floorHeightAt(cx + worldDirX * mid, cz + worldDirZ * mid, false) < poolY + 0.008) lo = mid
+        else hi = mid
+      }
+      const rEdge = hi * radialT
       const px = cx + worldDirX * rEdge
       const pz = cz + worldDirZ * rEdge
       const floorY = field.floorHeightAt(px, pz, true)

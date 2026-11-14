@@ -4,7 +4,7 @@ import { HOLLOW_MAX, HollowField, RIMSTONE_LIP_HEIGHT, RIMSTONE_POOL_STEP } from
 import { buildHollowLakeGeometry, buildRimstonePoolGeometry } from './HollowLake.js'
 import { placeHollowRocks } from './HollowRocks.js'
 import { buildHollowSpeleothems } from './HollowSpeleothems.js'
-import { HollowSculpt } from './HollowSculpt.js'
+import { FLOW_LOBE, HollowSculpt } from './HollowSculpt.js'
 import { HollowSculptPool } from './HollowSculptPool.js'
 import { scheduleHollowDrops } from './HollowWater.js'
 
@@ -83,6 +83,18 @@ describe('Hollow — karst SDF, sculpted cave & speleothems', () => {
     }
     expect(maxLipY).toBeGreaterThan(Math.max(basinFloor, RIMSTONE_POOL_STEP) + 0.04)
     expect(maxLipY).toBeGreaterThanOrEqual(RIMSTONE_LIP_HEIGHT - 0.02)
+
+    // The cascade climbs in rimstone terraces: crests standing proud of the pools behind them
+    let crests = 0
+    const cz0 = field.cascadeStart - 0.5
+    const cz1 = field.cascadeEnd + 0.5
+    for (let z = cz0; z > cz1; z -= 0.01) {
+      const x = field.spineX(z)
+      const h = field.floorHeightAt(x, z, false)
+      const behind = field.floorHeightAt(x, z - 0.12, false)
+      if (h > field.floorHeightAt(x, z + 0.01, false) && h >= field.floorHeightAt(x, z - 0.01, false) && h > behind + 0.01) crests++
+    }
+    expect(crests).toBeGreaterThanOrEqual(Math.round(field.params.terraceSteps / 2))
   })
 
   it('reshuffles major composition landmarks across seeds for widescreen seed-hunting', () => {
@@ -148,13 +160,17 @@ describe('Hollow — karst SDF, sculpted cave & speleothems', () => {
         }
       }
 
-      // The pool's rim hugs the inner dam wall, whatever the seed's dam size and yaw
+      // The pool's rim hugs the inner dam wall (its edge just under the face), whatever the seed's dam size and yaw
       const pool = buildRimstonePoolGeometry(field, 12, 32)
       const pos = pool.getAttribute('position') as BufferAttribute
+      const poolY = field.params.waterLevel + RIMSTONE_POOL_STEP
       let maxU = 0
       for (let i = 0; i < pos.count; i++) maxU = Math.max(maxU, field.rimstoneCoord(pos.getX(i), pos.getZ(i)))
-      expect(maxU).toBeLessThan(0.92)
-      expect(maxU).toBeGreaterThan(0.88)
+      expect(maxU).toBeLessThan(0.95)
+      expect(maxU).toBeGreaterThan(0.86)
+      for (let i = pos.count - 32; i < pos.count; i++) {
+        expect(field.floorHeightAt(pos.getX(i), pos.getZ(i), false)).toBeGreaterThan(poolY)
+      }
       lake.dispose()
       pool.dispose()
     }
@@ -165,28 +181,53 @@ describe('Hollow — karst SDF, sculpted cave & speleothems', () => {
     const rocks = placeHollowRocks(field, 6)
     expect(rocks.length).toBeGreaterThan(6)
 
-    const speleothems = buildHollowSpeleothems(field, {stalactiteDensity: 1, stalagmiteDensity: 1, draperyScale: 1})
+    const speleothems = buildHollowSpeleothems(field, {stalactiteDensity: 1, stalagmiteDensity: 1, draperyScale: 1, flowstoneDensity: 1})
     expect(speleothems.stalactiteCount).toBeGreaterThan(80)
     expect(speleothems.stalagmiteCount).toBeGreaterThan(8)
     expect(speleothems.draperyCount).toBeGreaterThanOrEqual(4)
-    expect(speleothems.bodies.length)
-      .toBe(speleothems.stalactiteCount + speleothems.stalagmiteCount + speleothems.draperyCount)
+    expect(speleothems.flowstoneCount).toBeGreaterThanOrEqual(2)
+    expect(speleothems.bodies.length).toBe(
+      speleothems.stalactiteCount + speleothems.stalagmiteCount + speleothems.draperyCount + speleothems.flowstoneCount,
+    )
+    // Formations of every form: carrots, straws and icicles; pagodas, candles, cones and bosses
+    const forms = new Set(speleothems.bodies.map(b => b.kind === 'stalactite' || b.kind === 'stalagmite' ? b.form : b.kind))
+    for (const form of ['carrot', 'straw', 'icicle', 'pagoda', 'candle', 'cone', 'boss']) {
+      expect(forms.has(form as never), form).toBe(true)
+    }
 
     // Every body is solid at its core and open around it (its own distance, not counting the cave)
     const sculpt = new HollowSculpt(field, [...rocks, ...speleothems.bodies])
     for (const body of sculpt.bodies) {
       let core: Vector3
       if (body.kind === 'rock') core = body.center
-      else if (body.kind === 'dripstone') core = new Vector3(...body.spine.subarray(8, 11))
+      else if (body.kind === 'stalactite') core = new Vector3(...body.spine.subarray(8, 11))
+      else if (body.kind === 'stalagmite') core = new Vector3(...body.plates.subarray(0, 3))
+      else if (body.kind === 'flowstone') core = new Vector3(...body.lobes.subarray(0, 3))
       else core = new Vector3(...body.curve.subarray(body.curve.length / 2 - 1, body.curve.length / 2 + 2))
       expect(sculpt.bodyDistance(body, core.x, core.y, core.z)).toBeLessThan(0)
       expect(sculpt.bodyDistance(body, body.max.x + 0.2, body.max.y + 0.2, body.max.z + 0.2)).toBeGreaterThan(0)
     }
+    // No long, thin stalactites: past a straw's length, one is still fat halfway down
+    for (const b of speleothems.bodies) {
+      if (b.kind !== 'stalactite') continue
+      const S = b.spine
+      const rings = S.length / 4 - 2
+      const length = Math.hypot(S[S.length - 4] - S[4], S[S.length - 3] - S[5], S[S.length - 2] - S[6])
+      if (length > 0.35) expect(S[(1 + Math.floor(rings / 2)) * 4 + 3], `${b.form} ${length.toFixed(2)} m`).toBeGreaterThan(0.025)
+    }
     // A stalactite hangs from its anchor to its tip
-    const stalactite = speleothems.bodies.find(b => b.kind === 'dripstone' && b.hanging)
-    expect(stalactite?.kind).toBe('dripstone')
-    const s = stalactite!.kind === 'dripstone' ? stalactite!.spine : new Float32Array(8)
+    const stalactite = speleothems.bodies.find(b => b.kind === 'stalactite')
+    expect(stalactite?.kind).toBe('stalactite')
+    const s = stalactite!.kind === 'stalactite' ? stalactite!.spine : new Float32Array(8)
     expect(s[s.length - 3]).toBeLessThan(s[5])
+    // A flowstone runs down the wall it seeps from, and stands out of it
+    for (const flow of speleothems.bodies) {
+      if (flow.kind !== 'flowstone') continue
+      const L = flow.lobes
+      expect(L[1] - L[L.length - FLOW_LOBE + 1]).toBeGreaterThan(0.5)
+      const outside = new Vector3(...L.subarray(0, 3)).addScaledVector(new Vector3(...L.subarray(9, 12)), L[14] + 0.02)
+      expect(field.sample(outside.x, outside.y, outside.z)).toBeGreaterThan(0)
+    }
     // A drapery is a sheet a few centimetres thick: solid on its curve, open a decimetre off it
     const drapery = speleothems.bodies.find(b => b.kind === 'drapery')!
     if (drapery.kind === 'drapery') {
@@ -222,7 +263,7 @@ describe('Hollow — karst SDF, sculpted cave & speleothems', () => {
   it('sculpts the cave and its bodies as one closed surface, materials blended across the fillets', async () => {
     const start = performance.now()
     const field = new HollowField({seed: 1056})
-    const speleothems = buildHollowSpeleothems(field, {stalactiteDensity: 1, stalagmiteDensity: 1, draperyScale: 1})
+    const speleothems = buildHollowSpeleothems(field, {stalactiteDensity: 1, stalagmiteDensity: 1, draperyScale: 1, flowstoneDensity: 1})
     const bodies = [...placeHollowRocks(field, 10), ...speleothems.bodies]
     const pool = new HollowSculptPool()
     const cave = (await pool.build(field, bodies))!
@@ -270,7 +311,7 @@ describe('Hollow — karst SDF, sculpted cave & speleothems', () => {
 
     // Around a stalagmite's foot the calcite runs out onto the cave: travertine falls off with the distance, through
     // values between the two (a blend, not a seam)
-    const stalagmites = speleothems.bodies.filter(b => b.kind === 'dripstone' && !b.hanging)
+    const stalagmites = speleothems.bodies.filter(b => b.kind === 'stalagmite')
     const bands = [0, 0, 0]
     const between = [0, 0, 0]
     for (let v = 0; v < pos.count; v++) {
